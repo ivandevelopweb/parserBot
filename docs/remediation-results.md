@@ -188,3 +188,12 @@ live production-readiness check. Remaining limits are: no live provider
 contract check, no Render deploy/shutdown observation, no Telegram client
 rendering check, no credential rotation or secret-history audit, and no
 automatic repair of invalid legacy timestamp values.
+
+## Render Blueprint compatibility follow-up
+
+При предварительной проверке Blueprint Render отклонил конфигурацию с ошибкой
+`maxShutdownDelaySeconds` вместе с Persistent Disk. Для сохранения диска
+`maxShutdownDelaySeconds` удалён из `render.yaml`; build/start-команды,
+`HOMEWORK_DATABASE_PATH=/var/data/homeworks.sqlite` и сам диск сохранены.
+Это изменение проверено только по локальной конфигурации и ещё не является
+результатом deploy или live production-проверки.

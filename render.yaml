@@ -5,7 +5,6 @@ services:
     plan: "0.5c-512mb"
     buildCommand: npm ci --omit=dev && npm test
     startCommand: npm run bot
-    maxShutdownDelaySeconds: 120
     envVars:
       - key: NODE_VERSION
         value: "24.21.0"
