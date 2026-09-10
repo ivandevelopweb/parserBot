@@ -232,8 +232,12 @@ home-page `gXtzob` response; it selects the visible sidebar records dynamically
 and does not hardcode the account's course ids. The web provider now performs
 three bounded state scans per course: `[1,2]` for not-turned-in work, the
 confirmed turned-in set for coverage, and `[3,4,5,6,7,9,11]` for confirmed
-completed/returned work. States `8` and `10`, and any record that cannot be
-classified consistently across scans, remain unknown. The first successful
+completed/returned work. Membership in either positive set means that the
+assignment is completed; this positive evidence wins if the provider slices
+overlap with `[1,2]`. An assignment seen only in `[1,2]` remains pending, while
+records absent from the scans are not inferred to be completed. Observations
+with the same Classroom id and `updatedAt` are merged so a sparse scan cannot
+erase a due date or link from a richer one. The first successful
 Classroom sync creates a provider-specific baseline and status reconciliation
 without sending existing tasks as new. Classroom due timestamps are converted
 to `Europe/Kyiv`; tasks without a due date sort last and are labeled `Дата

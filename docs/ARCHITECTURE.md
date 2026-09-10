@@ -181,11 +181,15 @@ item has been fetched.
 Production sync uses `src/classroom-provider.js` to call these operations. For
 each course it reads `[1,2]` (not turned in), the confirmed turned-in set
 `[3,4,8,10,5,7,9,6,11]` for coverage, and the safe completed/returned set
-`[3,4,5,6,7,9,11]`. States `3,4` and `5,6,7,9,11` are treated as completed;
-`8,10`, conflicting observations, and absent records are unknown and preserve
-the previous local status. This is deliberately conservative because the live
-investigation found a repeatable gap between the separate filtered result
-sets. The adapter filters only newly imported pending/content tasks by
+`[3,4,5,6,7,9,11]`. Membership in either positive set is treated as completed;
+that evidence wins over an overlapping `[1,2]` observation, while an
+assignment seen only in `[1,2]` is pending. Records absent from all scans are
+not inferred to be completed and preserve the previous local status. The
+adapter merges non-empty fields from observations with equal `updatedAt`
+before status reconciliation, so a sparse provider slice cannot erase a due
+date or link from a richer slice. This remains deliberately bounded because
+the live investigation found a repeatable gap between the separate filtered
+result sets. The adapter filters only newly imported pending/content tasks by
 `updatedAt >= 2026-09-01T00:00:00+03:00`, while status refreshes still search
 for known older rows and may insert a newly seen completed row without a
 notification. It converts `dueAt` to a `targetDate` and `targetTime` in

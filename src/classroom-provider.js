@@ -49,6 +49,26 @@ function timestampMilliseconds(value) {
   return Number.isFinite(milliseconds) ? milliseconds : null;
 }
 
+const CLASSROOM_OBSERVATION_FIELDS = [
+  'subject',
+  'title',
+  'description',
+  'assignedDate',
+  'targetDate',
+  'targetTime',
+  'lessonNumber',
+  'startTime',
+  'url',
+  'filesCount',
+];
+
+function isMissingObservationValue(field, value) {
+  if (field === 'filesCount') {
+    return !Number.isFinite(Number(value)) || Number(value) === 0;
+  }
+  return !hasValue(value);
+}
+
 export function isClassroomWebConfigured({
   env = process.env,
   defaultCookiesPath = DEFAULT_CLASSROOM_COOKIES_PATH,
@@ -223,10 +243,32 @@ function chooseObservationTask(previous, candidate) {
   }
   const previousTime = timestampMilliseconds(previous.snapshot?.updatedAt);
   const candidateTime = timestampMilliseconds(candidate.snapshot?.updatedAt);
-  return Number.isFinite(candidateTime)
+  const candidateIsLatest = Number.isFinite(candidateTime)
     && (!Number.isFinite(previousTime) || candidateTime >= previousTime)
-    ? candidate
-    : previous;
+  const latest = candidateIsLatest ? candidate : previous;
+  const fallback = candidateIsLatest ? previous : candidate;
+
+  // The three state scans can expose different projections of one coursework
+  // record. Only merge observations with equal (or missing) updatedAt values;
+  // a genuinely newer snapshot must be allowed to remove an old due date or
+  // link.
+  if (Number.isFinite(previousTime) && Number.isFinite(candidateTime)
+    && previousTime !== candidateTime) {
+    return latest;
+  }
+
+  const snapshot = { ...latest.snapshot };
+  for (const field of CLASSROOM_OBSERVATION_FIELDS) {
+    if (!isMissingObservationValue(field, snapshot[field])) {
+      continue;
+    }
+    const fallbackValue = fallback.snapshot?.[field];
+    if (!isMissingObservationValue(field, fallbackValue)) {
+      snapshot[field] = fallbackValue;
+    }
+  }
+
+  return { ...latest, snapshot };
 }
 
 export async function getClassroomWebHomeworks(
@@ -345,11 +387,13 @@ export async function getClassroomWebHomeworks(
   const currentExternalIds = [];
   for (const [externalId, observation] of observations) {
     currentExternalIds.push(externalId);
-    const status = observation.pendingSeen && !observation.completedSeen
-      && !observation.turnedInSeen
-      ? CLASSROOM_STATUS_PENDING
-      : !observation.pendingSeen && observation.completedSeen
-        ? CLASSROOM_STATUS_COMPLETED
+    // A positive turned-in/completed observation wins over a not-turned-in
+    // slice. The Classroom response sets are overlapping provider views, so
+    // letting pending win here can reopen a task after the user submitted it.
+    const status = observation.turnedInSeen || observation.completedSeen
+      ? CLASSROOM_STATUS_COMPLETED
+      : observation.pendingSeen
+        ? CLASSROOM_STATUS_PENDING
         : CLASSROOM_STATUS_UNKNOWN;
     if (status === CLASSROOM_STATUS_UNKNOWN) {
       continue;

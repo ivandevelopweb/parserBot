@@ -141,7 +141,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
   assert.match(logs[0], /ignored by updatedAt cutoff: 1/);
 });
 
-test('Classroom web provider reads explicit state scans and leaves ambiguous states unknown', async () => {
+test('Classroom web provider reads explicit state scans and prioritizes positive completion evidence', async () => {
   const stateRequests = [];
   const course = { courseId: 'course-1', name: 'Алгебра' };
   const assignment = (assignmentId, title, updatedAt = '2026-09-09T00:00:00.000Z') => ({
@@ -179,19 +179,67 @@ test('Classroom web provider reads explicit state scans and leaves ambiguous sta
   ]);
   assert.deepEqual(
     tasks.map((task) => [task.externalId, task.classroomStatus]),
-    [['course-1:pending', CLASSROOM_STATUS_PENDING], ['course-1:done', CLASSROOM_STATUS_COMPLETED]],
+    [
+      ['course-1:pending', CLASSROOM_STATUS_PENDING],
+      ['course-1:done', CLASSROOM_STATUS_COMPLETED],
+      ['course-1:ambiguous', CLASSROOM_STATUS_COMPLETED],
+    ],
   );
   assert.deepEqual(
     tasks.statusUpdates.map(({ task, status }) => [task.externalId, status]),
     [
       ['course-1:pending', CLASSROOM_STATUS_PENDING],
       ['course-1:done', CLASSROOM_STATUS_COMPLETED],
+      ['course-1:ambiguous', CLASSROOM_STATUS_COMPLETED],
       ['course-1:old-done', CLASSROOM_STATUS_COMPLETED],
     ],
   );
   assert.equal(tasks.statusSyncEnabled, true);
   assert.equal(tasks.statusReconciliationComplete, true);
   assert.equal(tasks.currentExternalIds.includes('course-1:ambiguous'), true);
+});
+
+test('Classroom state scans merge a complete due snapshot before marking work completed', async () => {
+  const course = { courseId: 'course-1', name: 'Алгебра' };
+  const assignment = (dueAt) => ({
+    assignmentId: 'work-1',
+    title: 'Виконати вправу',
+    description: 'Опрацювати параграф',
+    dueAt,
+    updatedAt: '2026-09-09T00:00:00.000Z',
+  });
+  const client = {
+    supportsStateFilters: true,
+    async getCourses() {
+      return [course];
+    },
+    async getCourseWorkForCourse(_courseId, options) {
+      const key = options.displayStates.join(',');
+      if (key === '1,2') {
+        return {
+          assignments: [assignment('2026-09-11T08:00:00.000Z')],
+          recognized: true,
+          complete: true,
+        };
+      }
+      if (key === '3,4,8,10,5,7,9,6,11') {
+        return {
+          assignments: [assignment(null)],
+          recognized: true,
+          complete: true,
+        };
+      }
+      return { assignments: [], recognized: true, complete: true };
+    },
+  };
+
+  const tasks = await getClassroomWebHomeworks(client, { logger: () => {} });
+
+  assert.equal(tasks.length, 1);
+  assert.equal(tasks[0].classroomStatus, CLASSROOM_STATUS_COMPLETED);
+  assert.equal(tasks[0].snapshot.targetDate, '2026-09-11');
+  assert.equal(tasks[0].snapshot.targetTime, '11:00');
+  assert.equal(tasks.statusUpdates[0].task.snapshot.targetDate, '2026-09-11');
 });
 
 test('web Classroom configuration selects the authenticated web provider', () => {

@@ -657,6 +657,44 @@ test('Classroom submission changes one stable row to completed without a duplica
   }
 });
 
+test('an automatic Classroom completion can be reopened only by a pending provider status', async () => {
+  const context = await createTestContext();
+  const messages = [];
+  const task = classroomHomework();
+
+  try {
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task, status: 'pending' }]),
+      async (...args) => messages.push(args),
+    ));
+    const firstRow = await context.database.findByExternalId('course-1:work-1', 'classroom');
+
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task, status: 'completed', includeTask: false }]),
+      async (...args) => messages.push(args),
+      { now: new Date('2026-09-09T13:00:00.000Z') },
+    ));
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task, status: 'pending', includeTask: false }]),
+      async (...args) => messages.push(args),
+      { now: new Date('2026-09-09T14:00:00.000Z') },
+    ));
+
+    const reopened = await context.database.findByExternalId('course-1:work-1', 'classroom');
+    assert.equal(await context.database.countBySource('classroom'), 1);
+    assert.equal(reopened.id, firstRow.id);
+    assert.equal(reopened.status, 'pending');
+    assert.equal(reopened.completionOrigin, null);
+    assert.equal(reopened.completedAt, null);
+    assert.equal(messages.length, 0);
+  } finally {
+    await context.close();
+  }
+});
+
 test('a first-seen old Classroom assignment already completed is stored quietly', async () => {
   const context = await createTestContext();
   const messages = [];
