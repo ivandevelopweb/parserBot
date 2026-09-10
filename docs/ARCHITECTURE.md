@@ -4,7 +4,7 @@
 
 HomeworkParser reads homework from Єдина школа and, when configured, Google Classroom; compares it with local state; and sends new or changed assignments to Telegram. Classroom production sync uses the validated web/RPC adapter when an authenticated browser cookie source is configured, while the low-level web client remains isolated behind that adapter.
 
-The project is built for one local process, one Єдина школа account, one optional Google Classroom account, and one configured Telegram chat.
+The project is built for one local process, one Єдина школа account, one optional Google Classroom browser session, and one configured Telegram chat. The Telegram UI can store the browser's Google account order used when opening Classroom links.
 
 The E-school login, diary access, Classroom API/web calls, and Telegram calls use HTTP clients. The Classroom web path reuses cookies from an already authenticated browser session; it does not implement Google username/password login.
 
@@ -52,7 +52,7 @@ In `npm run bot` mode this flow starts once at process startup and then runs eve
 | Storage | `src/homework-db.js`, `src/postgres-homework-db.js`, `src/homework-db-shared.js` | Require `HOMEWORK_DATABASE_URL`, initialize the PostgreSQL schema version 4, migrate v3 rows without deleting data, normalize timestamps to ISO, and store source-aware tasks, status origins, notifications, and the Telegram offset through an async pool contract. |
 | Legacy storage | `src/state.js` | Read and atomically write compatible `data/state.json`. Bot sync uses this only when importing an old baseline. |
 | Telegram transport | `src/telegram.js` | Small Telegram Bot API client built on `fetch`, with no bot framework. |
-| Telegram UI | `src/messages.js`, `src/telegram-bot.js` | Format messages, commands, inline keyboards, callbacks, long polling, and the scheduler. |
+| Telegram UI | `src/messages.js`, `src/telegram-bot.js` | Format messages, commands, inline keyboards, callbacks, Classroom account-order input, long polling, and the scheduler. |
 
 ### Two sync implementations
 
@@ -146,6 +146,13 @@ URL-safe route-id codec (the raw ids are encoded before entering the path).
 The message formatter also normalizes older raw-id snapshots, and change
 detection compares the normalized route so this compatibility repair cannot
 create a false Classroom notification.
+
+The Telegram UI optionally appends `authuser={N}` to Classroom links, where `N`
+is a validated integer from `0` through `10` stored in `database_meta`. This is
+only a browser account-order preference: it does not authenticate an account or
+store Google credentials. The preference is applied at render/delivery time,
+not to the stored snapshot, so changing it cannot create a content-change
+notification.
 
 `getCourses()` loads `/h` through the same authenticated cookie jar and calls
 the home-page `gXtzob` RPC with its observed opaque mask. In the live response,
@@ -299,6 +306,7 @@ and the old local SQLite file is neither read nor deleted.
 - `database_version` (current PostgreSQL schema version 4);
 - `baseline_initialized_at` for E-school and `baseline_initialized_at:classroom` for Classroom;
 - `classroom_status_reconciled_at`, written only after a complete, committed Classroom status pass;
+- `classroom_authuser_index`, the optional Google account order for rendered Classroom links;
 - `telegram_update_offset`.
 
 `homework_tasks` stores:
@@ -421,8 +429,11 @@ The bot registers these commands:
 ```
 
 The standard Telegram Menu button is also enabled with these commands. The
-in-chat menu has sections for current tasks, completed tasks, and help. The
-help screen uses a `↩️ До меню` button instead of repeating the main menu.
+in-chat menu has sections for current tasks, completed tasks, Classroom
+account-order settings, and help. The account-order flow accepts only integer
+values from `0` through `10` from the configured chat, persists the canonical
+number in `database_meta`, and uses `↩️ До меню` to cancel. The help screen uses
+a `↩️ До меню` button instead of repeating the main menu.
 
 ### Lists and callbacks
 

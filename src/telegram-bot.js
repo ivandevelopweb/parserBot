@@ -3,10 +3,14 @@ import {
   createCompleteKeyboard,
   formatHomeworkDetails,
   formatHomeworkList,
-  MAIN_MENU_KEYBOARD,
+  createMainMenuKeyboard,
   TELEGRAM_BOT_COMMANDS,
 } from './messages.js';
 import { syncAllHomeworks } from './bot-sync.js';
+import {
+  CLASSROOM_AUTHUSER_META_KEY,
+  parseClassroomAuthuserIndex,
+} from './classroom-url.js';
 import { ConfigError, errorMessage } from './utils.js';
 
 export const HOMEWORK_SYNC_INTERVAL_MS = 10 * 60 * 1000;
@@ -109,6 +113,7 @@ export function createTelegramBot({
   let pollAbortController = null;
   let activeSyncPromise = null;
   let stopRequested = false;
+  let awaitingClassroomAuthuser = false;
 
   async function runSync({ throwOnError = false } = {}) {
     if (stopRequested) {
@@ -155,15 +160,34 @@ export function createTelegramBot({
     }
   }
 
+  async function getClassroomAuthuserIndex() {
+    if (typeof database.getMeta !== 'function') {
+      return null;
+    }
+    return parseClassroomAuthuserIndex(
+      await database.getMeta(CLASSROOM_AUTHUSER_META_KEY),
+    );
+  }
+
+  async function getMainMenuKeyboard() {
+    return createMainMenuKeyboard({
+      classroomAuthuserIndex: await getClassroomAuthuserIndex(),
+    });
+  }
+
   async function sendMenu() {
     return telegram.sendTelegramMessage(MENU_TEXT, {
-      replyMarkup: MAIN_MENU_KEYBOARD,
+      replyMarkup: await getMainMenuKeyboard(),
     });
   }
 
   async function showList({ completed = false, page = 0, messageId = null } = {}) {
     const tasks = completed ? await database.completedTasks() : await database.currentTasks();
-    const view = formatHomeworkList(tasks, { completed, page });
+    const view = formatHomeworkList(tasks, {
+      completed,
+      page,
+      classroomAuthuserIndex: await getClassroomAuthuserIndex(),
+    });
     const options = {};
 
     if (view.parseMode !== undefined) {
@@ -186,6 +210,48 @@ export function createTelegramBot({
     return telegram.sendTelegramMessage(view.text, options);
   }
 
+  async function showClassroomAuthuserPrompt({ messageId = null } = {}) {
+    const currentIndex = await getClassroomAuthuserIndex();
+    const currentLabel = currentIndex === null ? 'не задано' : String(currentIndex);
+    const text = [
+      '🔗 Порядок акаунта Google Classroom',
+      '',
+      `Поточне значення: ${currentLabel}`,
+      '',
+      'Надішліть одним повідомленням число від 0 до 10.',
+      '0 — перший акаунт Google, 1 — другий і так далі.',
+    ].join('\n');
+    const options = { replyMarkup: createBackToMenuKeyboard() };
+
+    if (messageId !== null && messageId !== undefined) {
+      await telegram.editTelegramMessage(text, {
+        messageId,
+        ...options,
+      });
+    } else {
+      await telegram.sendTelegramMessage(text, options);
+    }
+    awaitingClassroomAuthuser = true;
+  }
+
+  async function handleClassroomAuthuserInput(message) {
+    const index = parseClassroomAuthuserIndex(message.text);
+    if (index === null) {
+      await telegram.sendTelegramMessage(
+        'Введіть ціле число від 0 до 10. Або натисніть «До меню», щоб скасувати.',
+        { replyMarkup: createBackToMenuKeyboard() },
+      );
+      return;
+    }
+
+    await database.setMeta(CLASSROOM_AUTHUSER_META_KEY, index);
+    awaitingClassroomAuthuser = false;
+    await telegram.sendTelegramMessage(
+      `✅ Порядок акаунта Classroom збережено: ${index}`,
+      { replyMarkup: await getMainMenuKeyboard() },
+    );
+  }
+
   async function handleMessage(message) {
     if (!isConfiguredChat(getMessageChatId(message), allowedChatId)) {
       return;
@@ -197,15 +263,21 @@ export function createTelegramBot({
       .toLowerCase()
       .replace(/@[^@]+$/, '');
     if (['/start', '/menu'].includes(command)) {
+      awaitingClassroomAuthuser = false;
       await sendMenu();
     } else if (command === '/current') {
+      awaitingClassroomAuthuser = false;
       await showList();
     } else if (command === '/completed') {
+      awaitingClassroomAuthuser = false;
       await showList({ completed: true });
     } else if (command === '/help') {
+      awaitingClassroomAuthuser = false;
       await telegram.sendTelegramMessage(HELP_TEXT, {
         replyMarkup: createBackToMenuKeyboard(),
       });
+    } else if (awaitingClassroomAuthuser) {
+      await handleClassroomAuthuserInput(message);
     }
   }
 
@@ -239,11 +311,18 @@ export function createTelegramBot({
 
     try {
       if (data === 'menu:main') {
+        awaitingClassroomAuthuser = false;
         await answerCallback(callbackQuery);
         await telegram.editTelegramMessage(MENU_TEXT, {
           messageId,
-          replyMarkup: MAIN_MENU_KEYBOARD,
+          replyMarkup: await getMainMenuKeyboard(),
         });
+        return;
+      }
+
+      if (data === 'menu:classroom-authuser') {
+        await answerCallback(callbackQuery);
+        await showClassroomAuthuserPrompt({ messageId });
         return;
       }
 
@@ -308,12 +387,13 @@ export function createTelegramBot({
         const detailOptions = {
           messageId,
           replyMarkup: createBackToMenuKeyboard(),
+          classroomAuthuserIndex: await getClassroomAuthuserIndex(),
         };
         if (completed.source === 'classroom' || completed.snapshot?.source === 'classroom') {
           detailOptions.parseMode = 'HTML';
         }
         await telegram.editTelegramMessage(
-          formatHomeworkDetails(completed, { completed: true }),
+          formatHomeworkDetails(completed, detailOptions),
           detailOptions,
         );
         return;

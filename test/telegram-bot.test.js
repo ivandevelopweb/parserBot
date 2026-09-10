@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createTelegramBot } from '../src/telegram-bot.js';
+import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 function createTelegramMock() {
@@ -253,6 +254,53 @@ test('Telegram help shows both providers and a button back to the menu', async (
     const helpEditCall = context.telegram.calls.at(-1);
     assert.equal(helpEditCall.method, 'edit');
     assert.equal(helpEditCall.args[1].replyMarkup.inline_keyboard[0][0].callback_data, 'menu:main');
+  } finally {
+    await context.database.close();
+  }
+});
+
+test('Telegram menu stores a validated Classroom account order and reflects it in the menu', async () => {
+  const context = await createBotContext();
+
+  try {
+    await context.bot.handleUpdate({
+      message: { chat: { id: 123 }, text: '/start' },
+    });
+    const initialMenu = context.telegram.calls.at(-1);
+    assert.equal(
+      initialMenu.args[1].replyMarkup.inline_keyboard[2][0].text,
+      '🔗 Акаунт Classroom: не задано',
+    );
+
+    await context.bot.handleUpdate({
+      callback_query: {
+        id: 'callback-classroom-authuser',
+        data: 'menu:classroom-authuser',
+        message: { message_id: 50, chat: { id: 123 } },
+      },
+    });
+    const prompt = context.telegram.calls.at(-1);
+    assert.equal(prompt.method, 'edit');
+    assert.match(prompt.args[0], /число від 0 до 10/);
+    assert.equal(await context.database.getMeta(CLASSROOM_AUTHUSER_META_KEY), null);
+
+    await context.bot.handleUpdate({
+      message: { chat: { id: 123 }, text: '11' },
+    });
+    assert.match(context.telegram.calls.at(-1).args[0], /від 0 до 10/);
+    assert.equal(await context.database.getMeta(CLASSROOM_AUTHUSER_META_KEY), null);
+
+    await context.bot.handleUpdate({
+      message: { chat: { id: 123 }, text: '10' },
+    });
+    assert.equal(await context.database.getMeta(CLASSROOM_AUTHUSER_META_KEY), '10');
+    const confirmation = context.telegram.calls.at(-1);
+    assert.equal(confirmation.method, 'send');
+    assert.match(confirmation.args[0], /збережено: 10/);
+    assert.equal(
+      confirmation.args[1].replyMarkup.inline_keyboard[2][0].text,
+      '🔗 Акаунт Classroom: 10',
+    );
   } finally {
     await context.database.close();
   }

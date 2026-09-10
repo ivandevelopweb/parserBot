@@ -1,6 +1,10 @@
 import { buildHomeworkWebUrl } from './eschool.js';
 import { MAX_TELEGRAM_MESSAGE_LENGTH } from './telegram.js';
-import { normalizeClassroomAssignmentUrl } from './classroom-url.js';
+import {
+  addClassroomAuthuserParam,
+  normalizeClassroomAssignmentUrl,
+  parseClassroomAuthuserIndex,
+} from './classroom-url.js';
 import { formatDateForDisplay, normalizeDescription, uniqueStable } from './utils.js';
 
 function getSnapshot(task) {
@@ -48,7 +52,7 @@ function isSafeHomeworkUrl(value) {
   }
 }
 
-function getHomeworkWebUrlCandidates(task) {
+function getHomeworkWebUrlCandidates(task, { classroomAuthuserIndex = null } = {}) {
   const snapshot = getSnapshot(task);
   const explicitUrls = [
     snapshot.url,
@@ -63,7 +67,7 @@ function getHomeworkWebUrlCandidates(task) {
     .map((value) => {
       const normalized = String(value).trim();
       return getSource(task) === 'classroom'
-        ? normalizeClassroomAssignmentUrl(normalized)
+        ? addClassroomAuthuserParam(normalizeClassroomAssignmentUrl(normalized), classroomAuthuserIndex)
         : normalized;
     });
 
@@ -77,12 +81,12 @@ function getHomeworkWebUrlCandidates(task) {
   return [...new Set([...safeExplicitUrls, fallbackUrl].filter(Boolean))];
 }
 
-function getHomeworkWebUrl(task) {
-  return getHomeworkWebUrlCandidates(task)[0] ?? null;
+function getHomeworkWebUrl(task, options = {}) {
+  return getHomeworkWebUrlCandidates(task, options)[0] ?? null;
 }
 
-function getShortestHomeworkWebUrl(task) {
-  return getHomeworkWebUrlCandidates(task)
+function getShortestHomeworkWebUrl(task, options = {}) {
+  return getHomeworkWebUrlCandidates(task, options)
     .sort((left, right) => left.length - right.length)[0] ?? null;
 }
 
@@ -130,13 +134,16 @@ function truncateEscapedHtmlTextToLength(value, maxLength) {
   return result;
 }
 
-function formatLinkedHomeworkTitle(task, { truncate = false } = {}) {
+function formatLinkedHomeworkTitle(task, {
+  truncate = false,
+  classroomAuthuserIndex = null,
+} = {}) {
   const snapshot = getSnapshot(task);
   const normalizedDescription = normalizeDescription(snapshot.title ?? snapshot.description);
   const description = truncate
     ? truncateText(normalizedDescription, HOMEWORK_DISPLAY_MAX_LENGTH)
     : normalizedDescription;
-  const url = getHomeworkWebUrl(task);
+  const url = getHomeworkWebUrl(task, { classroomAuthuserIndex });
   const sourceLabel = getSourceLabel(task);
   const label = description ? `${description} (${sourceLabel})` : sourceLabel;
 
@@ -147,10 +154,13 @@ function formatLinkedHomeworkTitle(task, { truncate = false } = {}) {
   return `<a href="${escapeHtml(url)}">${escapeHtml(label)}</a>`;
 }
 
-function formatHomeworkListItem(task) {
+function formatHomeworkListItem(task, { classroomAuthuserIndex = null } = {}) {
   const snapshot = getSnapshot(task);
   const subject = String(snapshot.subject ?? '').trim();
-  const linkedTitle = formatLinkedHomeworkTitle(task, { truncate: true });
+  const linkedTitle = formatLinkedHomeworkTitle(task, {
+    truncate: true,
+    classroomAuthuserIndex,
+  });
 
   if (!subject) {
     return `• ${linkedTitle}`;
@@ -173,7 +183,10 @@ function formatLesson(snapshot, { escape = false } = {}) {
   return details.join(', ');
 }
 
-function buildHomeworkMessage(task, type = 'new', { title } = {}) {
+function buildHomeworkMessage(task, type = 'new', {
+  title,
+  classroomAuthuserIndex = null,
+} = {}) {
   const snapshot = getSnapshot(task);
   const source = getSource(task);
   const resolvedTitle = title ?? (type === 'changed'
@@ -198,7 +211,7 @@ function buildHomeworkMessage(task, type = 'new', { title } = {}) {
   }
   if (description) {
     if (source === 'classroom') {
-      sections.push(`📝 ${formatLinkedHomeworkTitle(task)}`);
+      sections.push(`📝 ${formatLinkedHomeworkTitle(task, { classroomAuthuserIndex })}`);
       if (homeworkTitle && homeworkTitle !== description) {
         sections.push(`📄 ${escapeHtml(description)}`);
       }
@@ -206,7 +219,7 @@ function buildHomeworkMessage(task, type = 'new', { title } = {}) {
       sections.push(`📝 ${description}`);
     }
   } else if (source === 'classroom' && homeworkTitle) {
-    sections.push(`📝 ${formatLinkedHomeworkTitle(task)}`);
+    sections.push(`📝 ${formatLinkedHomeworkTitle(task, { classroomAuthuserIndex })}`);
   }
   if (topics.length > 0) {
     sections.push(`📖 Теми:\n${topics.map((topic) => (
@@ -232,7 +245,10 @@ function buildHomeworkMessage(task, type = 'new', { title } = {}) {
 
 const COMPACT_NOTIFICATION_MARKER = 'ℹ️ Повідомлення скорочено; повний текст збережено.';
 
-function buildCompactHomeworkMessage(task, type = 'new', { title } = {}) {
+function buildCompactHomeworkMessage(task, type = 'new', {
+  title,
+  classroomAuthuserIndex = null,
+} = {}) {
   const snapshot = getSnapshot(task);
   const source = getSource(task);
   const resolvedTitle = title ?? (type === 'changed'
@@ -282,7 +298,7 @@ function buildCompactHomeworkMessage(task, type = 'new', { title } = {}) {
   }
 
   const compact = sections.join('\n\n');
-  const url = getShortestHomeworkWebUrl(task);
+  const url = getShortestHomeworkWebUrl(task, { classroomAuthuserIndex });
   if (url) {
     const link = source === 'classroom'
       ? `<a href="${escapeHtml(url)}">Відкрити повне завдання</a>`
@@ -321,21 +337,37 @@ export function formatHomeworkMessage(task, type = 'new', options = {}) {
   return buildCompactHomeworkMessage(task, type, options);
 }
 
-export function formatNewHomeworkMessage(task) {
-  return formatHomeworkMessage(task, 'new', { title: '📚 Нове завдання' });
+export function formatNewHomeworkMessage(task, options = {}) {
+  return formatHomeworkMessage(task, 'new', {
+    ...options,
+    title: '📚 Нове завдання',
+  });
 }
 
-export function formatChangedHomeworkMessage(task) {
-  return formatHomeworkMessage(task, 'changed', { title: '✏️ Завдання змінено' });
+export function formatChangedHomeworkMessage(task, options = {}) {
+  return formatHomeworkMessage(task, 'changed', {
+    ...options,
+    title: '✏️ Завдання змінено',
+  });
 }
 
-export const MAIN_MENU_KEYBOARD = {
-  inline_keyboard: [
-    [{ text: '📚 Поточні завдання', callback_data: 'menu:current' }],
-    [{ text: '✅ Все виконані завдання', callback_data: 'menu:completed' }],
-    [{ text: 'ℹ️ Довідка', callback_data: 'menu:help' }],
-  ],
-};
+export function createMainMenuKeyboard({ classroomAuthuserIndex = null } = {}) {
+  const parsedIndex = parseClassroomAuthuserIndex(classroomAuthuserIndex);
+  const accountLabel = parsedIndex === null
+    ? '🔗 Акаунт Classroom: не задано'
+    : `🔗 Акаунт Classroom: ${parsedIndex}`;
+
+  return {
+    inline_keyboard: [
+      [{ text: '📚 Поточні завдання', callback_data: 'menu:current' }],
+      [{ text: '✅ Все виконані завдання', callback_data: 'menu:completed' }],
+      [{ text: accountLabel, callback_data: 'menu:classroom-authuser' }],
+      [{ text: 'ℹ️ Довідка', callback_data: 'menu:help' }],
+    ],
+  };
+}
+
+export const MAIN_MENU_KEYBOARD = createMainMenuKeyboard();
 
 export const TELEGRAM_BOT_COMMANDS = [
   { command: 'start', description: 'Відкрити головне меню' },
@@ -436,7 +468,12 @@ export const HOMEWORK_LIST_PAGE_SIZE = 6;
 
 export function formatHomeworkList(
   tasks,
-  { completed = false, page = 0, pageSize = HOMEWORK_LIST_PAGE_SIZE } = {},
+  {
+    completed = false,
+    page = 0,
+    pageSize = HOMEWORK_LIST_PAGE_SIZE,
+    classroomAuthuserIndex = null,
+  } = {},
 ) {
   const sorted = [...tasks].sort((left, right) => {
     const leftDate = getSnapshot(left).targetDate || getSnapshot(left).assignedDate || '9999-99-99';
@@ -470,7 +507,9 @@ export function formatHomeworkList(
     lines.push(
       `📅 ${date === 'unknown' ? 'Дата здачі не вказана' : formatDateForDisplay(date)} · ${dateTasks.length}`,
     );
-    lines.push(...dateTasks.map(formatHomeworkListItem));
+    lines.push(...dateTasks.map((task) => formatHomeworkListItem(task, {
+      classroomAuthuserIndex,
+    })));
   }
 
   return {
@@ -487,8 +526,12 @@ export function formatHomeworkList(
   };
 }
 
-export function formatHomeworkDetails(task, { completed = false } = {}) {
+export function formatHomeworkDetails(task, {
+  completed = false,
+  classroomAuthuserIndex = null,
+} = {}) {
   return formatHomeworkMessage(task, 'new', {
     title: completed ? '✅ Виконане завдання' : '📚 Завдання',
+    classroomAuthuserIndex,
   });
 }

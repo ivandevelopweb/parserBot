@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import { createEmptyState } from '../src/state.js';
 import { syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
+import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createPostgresHomeworkDatabase } from '../src/postgres-homework-db.js';
 import { toSyncTask } from '../src/sync.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
@@ -773,6 +774,45 @@ test('Classroom ignores updatedAt-only changes, notifies content changes, and se
     assert.equal(added.newTasks, 1);
     assert.equal(messages.length, 2);
     assert.equal(await context.database.countBySource('classroom'), 2);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Classroom notifications use the saved Google account order when rendering links', async () => {
+  const context = await createTestContext();
+  const messages = [];
+  const original = classroomHomework();
+  const newTask = classroomHomework({
+    courseWorkId: 'work-2',
+    externalId: 'course-1:work-2',
+    title: 'Нове завдання',
+    description: 'Виконати вправу',
+    url: 'https://classroom.google.com/c/course-1/a/work-2/details',
+  });
+
+  try {
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task: original, status: 'pending' }]),
+      async (...args) => messages.push(args),
+    ));
+    await context.database.setMeta(CLASSROOM_AUTHUSER_META_KEY, 3);
+
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([
+        { task: original, status: 'pending' },
+        { task: newTask, status: 'pending' },
+      ]),
+      async (...args) => messages.push(args),
+    ));
+
+    assert.equal(messages.length, 1);
+    assert.match(
+      messages[0][0],
+      /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0y\/details\?authuser=3">Нове завдання \(Classroom\)<\/a>/,
+    );
   } finally {
     await context.close();
   }

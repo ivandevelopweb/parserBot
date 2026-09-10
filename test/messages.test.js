@@ -133,6 +133,31 @@ test('formatHomeworkList renders Classroom source labels and links', () => {
   );
 });
 
+test('Classroom links include the selected Google account order without changing task data', () => {
+  const task = {
+    id: 14,
+    source: 'classroom',
+    snapshot: {
+      source: 'classroom',
+      title: 'Завдання з акаунтом',
+      description: 'Відкрити з потрібним акаунтом',
+      targetDate: '2026-09-11',
+      url: 'https://classroom.google.com/c/course-1/a/work-14/details',
+    },
+  };
+
+  const view = formatHomeworkList([task], { classroomAuthuserIndex: 2 });
+  assert.match(
+    view.text,
+    /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0xNFpa\/details\?authuser=2">Завдання з акаунтом \(Classroom\)<\/a>/,
+  );
+  assert.match(
+    formatHomeworkMessage(task, 'new', { classroomAuthuserIndex: 2 }),
+    /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0xNFpa\/details\?authuser=2">Завдання з акаунтом \(Classroom\)<\/a>/,
+  );
+  assert.equal(task.snapshot.url, 'https://classroom.google.com/c/course-1/a/work-14/details');
+});
+
 test('formatHomeworkList truncates long assignment text in links and buttons', () => {
   const longDescription = `${'А'.repeat(49)}TAIL ЗАВДАННЯ НЕ ПОКАЗУВАТИ`;
   const expectedDescription = `${'А'.repeat(49)}…`;

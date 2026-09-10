@@ -6,7 +6,11 @@ import {
 } from './messages.js';
 import { createStateStore } from './state.js';
 import { toSyncTask } from './sync.js';
-import { normalizeClassroomAssignmentUrl } from './classroom-url.js';
+import {
+  CLASSROOM_AUTHUSER_META_KEY,
+  normalizeClassroomAssignmentUrl,
+  parseClassroomAuthuserIndex,
+} from './classroom-url.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
 import { CLASSROOM_STATUS_RECONCILED_META_KEY } from './homework-db-shared.js';
 
@@ -262,6 +266,10 @@ async function deliverPendingNotifications({
   const pendingTasks = typeof database.pendingNotifications === 'function'
     ? await database.pendingNotifications(source)
     : [];
+  const classroomAuthuserIndex = source === CLASSROOM_SOURCE
+    && typeof database.getMeta === 'function'
+    ? parseClassroomAuthuserIndex(await database.getMeta(CLASSROOM_AUTHUSER_META_KEY))
+    : null;
   let sentTasks = 0;
   let deliveryErrors = 0;
 
@@ -288,8 +296,8 @@ async function deliverPendingNotifications({
 
     const kind = currentTask.notificationKind || 'new';
     const message = kind === 'changed'
-      ? formatChangedHomeworkMessage(currentTask)
-      : formatNewHomeworkMessage(currentTask);
+      ? formatChangedHomeworkMessage(currentTask, { classroomAuthuserIndex })
+      : formatNewHomeworkMessage(currentTask, { classroomAuthuserIndex });
     const sendOptions = {
       replyMarkup: createCompleteKeyboard(currentTask.id),
       task: currentTask,

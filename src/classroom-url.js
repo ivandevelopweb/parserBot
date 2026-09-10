@@ -1,6 +1,7 @@
 const CLASSROOM_ORIGIN = 'https://classroom.google.com';
 const CLASSROOM_DETAILS_PATH = /^\/c\/([^/]+)\/a\/([^/]+)\/details\/?$/u;
 const CLASSROOM_ROUTE_ID = /^[A-Za-z0-9_-]+$/u;
+export const CLASSROOM_AUTHUSER_META_KEY = 'classroom_authuser_index';
 
 function normalizeId(value) {
   const normalized = String(value ?? '').trim();
@@ -105,5 +106,44 @@ export function normalizeClassroomAssignmentUrl(value) {
   }
 
   url.pathname = `/c/${encodedCourseId}/a/${encodedAssignmentId}/details`;
+  return url.toString();
+}
+
+export function parseClassroomAuthuserIndex(value) {
+  const normalized = String(value ?? '').trim();
+  if (!/^\d+$/u.test(normalized)) {
+    return null;
+  }
+
+  const parsed = Number(normalized);
+  return Number.isSafeInteger(parsed) && parsed >= 0 && parsed <= 10
+    ? parsed
+    : null;
+}
+
+/*
+ * Google chooses a signed-in account from the authuser query parameter. Keep
+ * this preference out of stored snapshots so changing it cannot look like a
+ * Classroom content change or create a notification.
+ */
+export function addClassroomAuthuserParam(value, authuserIndex) {
+  const normalized = normalizeClassroomAssignmentUrl(value);
+  const parsedIndex = parseClassroomAuthuserIndex(authuserIndex);
+  if (!normalized || parsedIndex === null) {
+    return normalized;
+  }
+
+  let url;
+  try {
+    url = new URL(normalized);
+  } catch {
+    return normalized;
+  }
+
+  if (url.hostname !== 'classroom.google.com') {
+    return normalized;
+  }
+
+  url.searchParams.set('authuser', String(parsedIndex));
   return url.toString();
 }

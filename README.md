@@ -158,12 +158,18 @@ one-time compatibility source; PostgreSQL is the active store.
 Telegram supports `/start`, `/menu`, `/current`, `/completed`, and `/help`. The main menu also has:
 
 - `📚 Поточні завдання`, which shows pending homework grouped by date;
-- `✅ Все виконані завдання`, which shows completed homework.
+- `✅ Все виконані завдання`, which shows completed homework;
+- `🔗 Акаунт Classroom`, which accepts a Google account order from `0` to `10`.
 
 Homework lists are grouped by date. Each homework title is an inline link to
 the source task: Єдина школа uses the diary URL and Classroom uses its direct
 details URL with Classroom's encoded route ids (or an explicit `alternateLink`
-when available). The source label is shown as `(Єдина школа)` or `(Classroom)`.
+when available). When the Classroom account order is configured, the bot adds
+or replaces the `authuser` query parameter on Classroom links at render time;
+the default unset value leaves links unchanged. This parameter selects an
+account only among the Google accounts already signed in to the browser, using
+Google's current account order. The source label is shown as `(Єдина школа)` or
+`(Classroom)`.
 Current tasks use `✅` callback buttons in a two-column grid, with no more than
 six tasks per page and pagination. For readability, the visible assignment
 title/description in list links and task buttons is limited to 50 characters
@@ -172,8 +178,8 @@ Completed tasks use `❌`, which returns a task to the pending state while
 keeping the completed list open. The menu also has `ℹ️ Довідка` with the
 command list; the help screen shows `↩️ До меню` to return to the main menu.
 
-The bot UI state, compact snapshots, Telegram offset, and pending notification
-queue are stored in PostgreSQL. Pending tasks are not removed by age. Completed
+The bot UI state, Classroom account-order preference, compact snapshots, Telegram
+offset, and pending notification queue are stored in PostgreSQL. Pending tasks are not removed by age. Completed
 tasks are removed after 14 days from `completedAt` during a later sync. A
 failed Telegram request leaves its queue entry pending for a later cycle.
 
