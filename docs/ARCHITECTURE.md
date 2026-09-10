@@ -421,8 +421,12 @@ Only one `npm run bot` instance should run at a time. A second instance receives
 ### Render deployment
 
 `render.yaml` defines one free Render Web Service with `npm run bot` as its
-start command. `src/health-server.js` answers `GET /healthz` on Render's
-`PORT`, but stores no application data. All durable state is in the PostgreSQL
+start command. `src/health-server.js` answers `GET /healthz` and `HEAD /healthz`
+on Render's `PORT`, but stores no application data. Both methods use the same
+readiness check and return 200 or 503; HEAD returns headers without a body so
+default UptimeRobot HTTP checks work. Other paths and methods return 404.
+Readiness reflects the process shutdown state, not provider or Telegram health.
+All durable state is in the PostgreSQL
 database configured by `HOMEWORK_DATABASE_URL`; no Render Persistent Disk or
 local SQLite file is used.
 

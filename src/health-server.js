@@ -21,7 +21,7 @@ export async function startHealthServer({
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
-    if (request.method !== 'GET' || url.pathname !== HEALTH_PATH) {
+    if (!['GET', 'HEAD'].includes(request.method) || url.pathname !== HEALTH_PATH) {
       response.statusCode = 404;
       response.setHeader('content-type', 'application/json; charset=utf-8');
       response.end(JSON.stringify({ error: 'not_found' }));
@@ -38,7 +38,9 @@ export async function startHealthServer({
     response.statusCode = ready ? 200 : 503;
     response.setHeader('cache-control', 'no-store');
     response.setHeader('content-type', 'application/json; charset=utf-8');
-    response.end(JSON.stringify({ status: ready ? 'ok' : 'unavailable' }));
+    response.end(request.method === 'HEAD'
+      ? undefined
+      : JSON.stringify({ status: ready ? 'ok' : 'unavailable' }));
   });
 
   await new Promise((resolve, reject) => {

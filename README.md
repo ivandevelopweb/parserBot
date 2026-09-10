@@ -142,9 +142,13 @@ horizontally. On SIGTERM/SIGINT the bot stops polling, aborts the active HTTP
 work, waits for the sync promise to drain, and only then closes the PostgreSQL
 pool. The local tests cover the abort/drain contract but do not constitute a
 live Render shutdown check. The free Web Service may sleep when idle; an
-external monitor such as UptimeRobot can request `GET /healthz` if the operator
-wants to reduce sleeping, but configuring that monitor is an operational step
-outside this repository.
+external monitor such as UptimeRobot can request `HEAD /healthz` (its default
+method) or `GET /healthz` if the operator wants to reduce sleeping. Set the
+monitor URL to `https://<service>.onrender.com/healthz`, with no authentication;
+the root path `/` returns 404. Both health methods return 200 when ready or
+503 when unavailable; HEAD has no response body. This checks HTTP availability,
+not the success of provider sync or Telegram polling. Configuring the monitor
+is an operational step outside this repository.
 
 On the first run, the existing archive is not sent. It becomes the baseline. If
 an older `data/state.json` already exists, its baseline is imported into
