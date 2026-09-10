@@ -881,6 +881,75 @@ function courseWorkPage(records, continuationToken = null) {
   ];
 }
 
+function streamItemPage(records, continuationToken = null) {
+  return [
+    'hrsi.qr',
+    continuationToken === null ? [false] : [true, [continuationToken]],
+    records.map((record) => [1, [record, null, null, null, null]]),
+  ];
+}
+
+test('coursework decoder recognizes the live stream-item envelope and nested assignments', () => {
+  const payload = streamItemPage([
+    courseWorkArrayRecord('work-1', 'course-1', 'Assignment'),
+  ]);
+  const decoded = decodeCourseWorkPayload(payload, { courseId: 'course-1', includeMetadata: true });
+  assert.equal(decoded.recognized, true);
+  assert.deepEqual(decoded.assignments.map(({ assignmentId }) => assignmentId), ['work-1']);
+});
+
+test('coursework decoder recognizes empty stream-item responses with omitted or empty records', () => {
+  for (const payload of [['hrsi.qr', [false]], streamItemPage([])]) {
+    assert.deepEqual(
+      decodeCourseWorkPayload(payload, { courseId: 'course-1', includeMetadata: true }),
+      { assignments: [], recognized: true },
+    );
+  }
+});
+
+test('coursework decoder rejects malformed and partially unknown stream-item collections', () => {
+  const record = courseWorkArrayRecord('work-1', 'course-1', 'Assignment');
+  const payloads = [
+    ['hrsi.qr'],
+    ['hrsi.qr', [], []],
+    ['hrsi.qr', [false], {}],
+    ['hrsi.qr', [false], [[1, [null]]]],
+    ['hrsi.qr', [false], [[1, [record]], [1, [null]]]],
+    streamItemPage([courseWorkArrayRecord('work-1', 'another-course', 'Assignment')]),
+    ['hrsi.qr', [true, ['next-token']]],
+  ];
+  for (const payload of payloads) {
+    const decoded = decodeCourseWorkPayload(payload, { courseId: 'course-1', includeMetadata: true });
+    assert.equal(decoded.recognized, false);
+  }
+});
+
+test('coursework fetch follows live stream-item pages and accepts the terminal empty response', async () => {
+  const calls = [];
+  const client = {
+    requestIdFactory: () => '4321',
+    async getAuthenticatedPage() {
+      return { bootstrap: BOOTSTRAP };
+    },
+    async request(_url, init) {
+      const fReq = JSON.parse(init.body.get('f.req'));
+      const payload = JSON.parse(fReq[0][0][1]);
+      calls.push(payload);
+      const responsePayload = payload[0][1] === null
+        ? streamItemPage([courseWorkArrayRecord('work-1', 'course-1', 'Assignment')], 'next-token')
+        : ['hrsi.qr', [false]];
+      return new Response(batchexecuteResponse(CLASSROOM_RPC_ID, responsePayload), { status: 200 });
+    },
+  };
+
+  const result = await getCourseWorkForCourse(client, 'course-1', { includePagination: true });
+  assert.deepEqual(result.assignments.map(({ assignmentId }) => assignmentId), ['work-1']);
+  assert.deepEqual(result.pageCounts, [1, 0]);
+  assert.equal(result.recognized, true);
+  assert.equal(result.complete, true);
+  assert.equal(calls[1][0][1], 'next-token');
+});
+
 test('coursework decoder accepts an explicitly valid empty collection', () => {
   assert.deepEqual(
     decodeCourseWorkPayload(courseWorkPage([], 'done'), { courseId: 'course-1' }),

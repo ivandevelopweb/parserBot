@@ -109,6 +109,11 @@ The web response does not expose a verified teacher field, so `teacherName` is
 normalized as `null`; course active/archived status is also not reported until
 an explicit status field is verified.
 
+The coursework decoder accepts the verified `hrsi.qr` web/RPC envelope,
+including empty lists with an omitted collection. Unknown or malformed
+responses still fail the Classroom scan and preserve its previous database
+snapshot. Authentication continues to use the existing browser cookies.
+
 Run the long-lived Telegram bot and scheduler:
 
 ```powershell

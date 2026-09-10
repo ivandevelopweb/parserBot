@@ -129,6 +129,10 @@ session-expired or bootstrap failure permits one forced page/bootstrap refresh
 and one retry of the same RPC; a second such failure is returned without
 another refresh. A response without a recognized coursework collection is
 rejected by the provider, so an unknown schema cannot look like an empty
+successful snapshot. The live `hrsi.qr` (QueryStreamItem) envelope is validated
+with coursework nested at `payload[2][i][1][0]`; its terminal empty response
+`["hrsi.qr", [false]]` is accepted even though it omits the collection.
+Malformed or unrecognized items reject the page instead of producing a partial
 successful snapshot. A controlled live experiment showed that the first
 numeric request field (`100`) changes the maximum returned record count, but
 its undocumented protocol meaning is not renamed to `pageSize`.

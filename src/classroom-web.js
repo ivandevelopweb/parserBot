@@ -1478,6 +1478,24 @@ function hasRecognizedCourseWorkCollection(value, courseId, seen = new Set(), de
   seen.add(value);
 
   if (Array.isArray(value)) {
+    if (value[0] === 'hrsi.qr') {
+      const header = value[1];
+      if (!Array.isArray(header) || typeof header[0] !== 'boolean') {
+        return false;
+      }
+      // QueryStreamItem wraps coursework at item[1][0]. Its terminal empty
+      // response omits the collection entirely: ['hrsi.qr', [false]].
+      // Validate each item so a changed wire shape cannot become partial success.
+      if (value.length === 2) {
+        return header[0] === false && header[1] == null;
+      }
+      return Array.isArray(value[2]) && value[2].every((item) => (
+        Array.isArray(item)
+        && Number.isInteger(item[0])
+        && Array.isArray(item[1])
+        && normalizeCourseWorkArray(item[1][0], courseId)
+      ));
+    }
     if (value[0] === 'hrq.cus' && Array.isArray(value[2])) {
       return value[2].length === 0
         || value[2].some((record) => normalizeCourseWorkArray(record, courseId));
