@@ -3,11 +3,12 @@ services:
     name: homework-parser
     runtime: node
     plan: "0.5c-512mb"
-    buildCommand: npm ci --omit=dev
+    buildCommand: npm ci --omit=dev && npm test
     startCommand: npm run bot
+    maxShutdownDelaySeconds: 120
     envVars:
       - key: NODE_VERSION
-        value: "22.5.0"
+        value: "24.21.0"
       - key: ESCHOOL_USERNAME
         sync: false
       - key: ESCHOOL_PASSWORD

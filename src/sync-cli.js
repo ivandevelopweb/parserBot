@@ -14,7 +14,6 @@ async function main() {
   const classroom = createConfiguredClassroomClient({ logger: console.log });
 
   try {
-    await auth.fullLogin();
     const result = await syncAllHomeworks({
       auth,
       telegram,

@@ -8,12 +8,12 @@ try {
   ({ DatabaseSync } = await import('node:sqlite'));
 } catch (error) {
   throw new SmokeTestError(
-    'SQLite storage requires Node.js 22.5 or newer (the built-in node:sqlite module is unavailable)',
+    'SQLite storage requires Node.js 24.21.0 or a later 24.x patch below 25 (the built-in node:sqlite module is unavailable)',
     { code: 'DATABASE_RUNTIME_ERROR', cause: error },
   );
 }
 
-export const DATABASE_VERSION = 2;
+export const DATABASE_VERSION = 3;
 export const DEFAULT_DATABASE_PATH = resolve(process.cwd(), 'data', 'homeworks.sqlite');
 
 function resolveConfiguredDatabasePath(filePath) {
@@ -33,6 +33,129 @@ export class HomeworkDatabaseError extends SmokeTestError {
     super(message, { code: 'DATABASE_ERROR', ...options });
     this.name = 'HomeworkDatabaseError';
   }
+}
+
+const TIMESTAMP_COLUMNS = [
+  'first_seen_at',
+  'last_seen_at',
+  'last_notified_at',
+  'completed_at',
+  'created_at',
+  'updated_at',
+];
+
+function normalizeTimestampForStorage(value, label = 'timestamp') {
+  if (value === null || value === undefined
+    || (typeof value === 'string' && value.trim() === '')) {
+    throw new HomeworkDatabaseError(`${label} must be a valid timestamp`);
+  }
+
+  const date = value instanceof Date ? value : new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    throw new HomeworkDatabaseError(`${label} must be a valid timestamp`);
+  }
+  return date.toISOString();
+}
+
+function normalizePersistedTimestamp(value) {
+  if (value === null || value === undefined || value === '') {
+    return { value, converted: false, invalid: false };
+  }
+
+  const date = new Date(String(value));
+  if (Number.isNaN(date.getTime())) {
+    return { value, converted: false, invalid: true };
+  }
+
+  const normalized = date.toISOString();
+  return {
+    value: normalized,
+    converted: normalized !== value,
+    invalid: false,
+  };
+}
+
+function readDatabaseVersion(database) {
+  const row = database
+    .prepare('SELECT value FROM database_meta WHERE key = ?')
+    .get('database_version');
+  if (!row) {
+    return 0;
+  }
+
+  const value = String(row.value);
+  if (!/^\d+$/u.test(value)) {
+    throw new HomeworkDatabaseError('SQLite database version metadata is invalid');
+  }
+
+  const version = Number(value);
+  if (!Number.isSafeInteger(version)) {
+    throw new HomeworkDatabaseError('SQLite database version metadata is invalid');
+  }
+  return version;
+}
+
+function migratePersistedTimestamps(database, fromVersion) {
+  const diagnostics = {
+    fromVersion,
+    toVersion: DATABASE_VERSION,
+    convertedValues: 0,
+    invalidValues: 0,
+  };
+
+  if (fromVersion >= DATABASE_VERSION) {
+    return diagnostics;
+  }
+
+  const rows = database.prepare(`
+    SELECT id, ${TIMESTAMP_COLUMNS.join(', ')}
+    FROM homework_tasks
+  `).all();
+  const update = database.prepare(`
+    UPDATE homework_tasks
+    SET ${TIMESTAMP_COLUMNS.map((column) => `${column} = ?`).join(', ')}
+    WHERE id = ?
+  `);
+  const setVersion = database.prepare(`
+    INSERT INTO database_meta (key, value) VALUES (?, ?)
+    ON CONFLICT(key) DO UPDATE SET value = excluded.value
+  `);
+
+  database.exec('BEGIN');
+  try {
+    for (const row of rows) {
+      const values = [];
+      let changed = false;
+      for (const column of TIMESTAMP_COLUMNS) {
+        const normalized = normalizePersistedTimestamp(row[column]);
+        values.push(normalized.value);
+        diagnostics.convertedValues += normalized.converted ? 1 : 0;
+        diagnostics.invalidValues += normalized.invalid ? 1 : 0;
+        changed ||= normalized.converted;
+      }
+      if (changed) {
+        update.run(...values, Number(row.id));
+      }
+    }
+
+    setVersion.run('database_version', String(DATABASE_VERSION));
+    database.exec('COMMIT');
+  } catch (error) {
+    try {
+      database.exec('ROLLBACK');
+    } catch {
+      // Preserve the original migration error.
+    }
+    if (error instanceof HomeworkDatabaseError) {
+      throw error;
+    }
+    throw new HomeworkDatabaseError(
+      `Could not migrate SQLite timestamps: ${errorMessage(error)}`,
+      { cause: error },
+    );
+  }
+
+  return diagnostics;
 }
 
 const BASE_SCHEMA = `
@@ -145,6 +268,14 @@ function externalId(task) {
     : String(value);
 }
 
+function taskIdentity(task) {
+  const source = sourceId(task);
+  if (source === 'classroom') {
+    return `${source}:external:${externalId(task) ?? task.fingerprint}`;
+  }
+  return `${source}:fingerprint:${task.fingerprint}`;
+}
+
 function baselineMetaKey(source) {
   return source === 'eschool' ? 'baseline_initialized_at' : `baseline_initialized_at:${source}`;
 }
@@ -163,6 +294,12 @@ export function createHomeworkDatabase({ filePath } = {}) {
   }
 
   let database;
+  let migrationDiagnostics = {
+    fromVersion: DATABASE_VERSION,
+    toVersion: DATABASE_VERSION,
+    convertedValues: 0,
+    invalidValues: 0,
+  };
   try {
     database = new DatabaseSync(databasePath);
     database.exec(BASE_SCHEMA);
@@ -177,13 +314,19 @@ export function createHomeworkDatabase({ filePath } = {}) {
       database.exec('ALTER TABLE homework_tasks ADD COLUMN external_id TEXT');
     }
     database.exec(SOURCE_INDEX_SCHEMA);
-    database
-      .prepare(`
-        INSERT INTO database_meta (key, value) VALUES (?, ?)
-        ON CONFLICT(key) DO UPDATE SET value = excluded.value
-      `)
-      .run('database_version', String(DATABASE_VERSION));
+    const storedVersion = readDatabaseVersion(database);
+    if (storedVersion > DATABASE_VERSION) {
+      throw new HomeworkDatabaseError(
+        `SQLite database version ${storedVersion} is newer than supported version ${DATABASE_VERSION}`,
+      );
+    }
+    migrationDiagnostics = migratePersistedTimestamps(database, storedVersion);
   } catch (error) {
+    try {
+      database?.close();
+    } catch {
+      // Preserve the original database-open error.
+    }
     throw new HomeworkDatabaseError(
       `Could not open SQLite database ${databasePath}: ${errorMessage(error)}`,
       { cause: error },
@@ -219,6 +362,11 @@ export function createHomeworkDatabase({ filePath } = {}) {
       json_extract(snapshot_json, '$.targetDate'),
       completed_at DESC,
       id
+  `);
+  const selectPendingNotifications = database.prepare(`
+    SELECT * FROM homework_tasks
+    WHERE notification_pending = 1
+    ORDER BY id
   `);
   const countTasks = database.prepare('SELECT COUNT(*) AS count FROM homework_tasks');
   const countTasksBySource = database.prepare(
@@ -298,6 +446,10 @@ export function createHomeworkDatabase({ filePath } = {}) {
     return selectMeta.get(String(key))?.value ?? null;
   }
 
+  function getMigrationDiagnostics() {
+    return { ...migrationDiagnostics };
+  }
+
   function setMeta(key, value) {
     try {
       upsertMeta.run(String(key), String(value));
@@ -335,25 +487,76 @@ export function createHomeworkDatabase({ filePath } = {}) {
     return rowToTask(selectByExternalId.get(sourceId({ source }), String(external)));
   }
 
+  function findMatches(tasks) {
+    const uniqueTasks = [];
+    const seenIdentities = new Set();
+    for (const task of tasks ?? []) {
+      assertTask(task);
+      const identity = taskIdentity(task);
+      if (seenIdentities.has(identity)) {
+        continue;
+      }
+      seenIdentities.add(identity);
+      uniqueTasks.push(task);
+    }
+
+    const matches = uniqueTasks.map(() => null);
+    const reservedRowIds = new Set();
+    const assign = (index, row) => {
+      if (!row || reservedRowIds.has(row.id)) {
+        return false;
+      }
+      matches[index] = row;
+      reservedRowIds.add(row.id);
+      return true;
+    };
+
+    // Exact identities always win and reserve their rows before the
+    // appointment-id compatibility fallback is considered.
+    uniqueTasks.forEach((task, index) => {
+      assign(index, findByExternalId(externalId(task), sourceId(task)));
+    });
+    uniqueTasks.forEach((task, index) => {
+      if (!matches[index]) {
+        assign(index, findByFingerprint(task.fingerprint, sourceId(task)));
+      }
+    });
+
+    const pendingByAppointment = new Map();
+    uniqueTasks.forEach((task, index) => {
+      if (matches[index] || sourceId(task) !== 'eschool') {
+        return;
+      }
+      const appointmentId = targetId(task);
+      if (!appointmentId) {
+        return;
+      }
+      const indexes = pendingByAppointment.get(appointmentId) ?? [];
+      indexes.push(index);
+      pendingByAppointment.set(appointmentId, indexes);
+    });
+
+    // The fallback is safe only when both the old and new sides are
+    // unambiguous. This prevents one old row from being reused for two
+    // different assignments from the same lesson.
+    for (const [appointmentId, indexes] of pendingByAppointment) {
+      const candidates = selectByTargetId
+        .all('eschool', appointmentId)
+        .map(rowToTask)
+        .filter((row) => !reservedRowIds.has(row.id));
+      if (indexes.length === 1 && candidates.length === 1) {
+        assign(indexes[0], candidates[0]);
+      }
+    }
+
+    return uniqueTasks.map((task, index) => ({
+      task,
+      previous: matches[index],
+    }));
+  }
+
   function findMatch(task) {
-    assertTask(task);
-    const source = sourceId(task);
-    const byExternalId = findByExternalId(externalId(task), source);
-    if (byExternalId) {
-      return byExternalId;
-    }
-
-    const exact = findByFingerprint(task.fingerprint, source);
-    if (exact) {
-      return exact;
-    }
-
-    if (source !== 'eschool') {
-      return null;
-    }
-
-    const candidates = selectByTargetId.all(source, targetId(task)).map(rowToTask);
-    return candidates.length === 1 ? candidates[0] : null;
+    return findMatches([task])[0]?.previous ?? null;
   }
 
   function currentTasks() {
@@ -364,24 +567,35 @@ export function createHomeworkDatabase({ filePath } = {}) {
     return selectCompleted.all().map(rowToTask);
   }
 
+  function pendingNotifications(source = null) {
+    const tasks = selectPendingNotifications.all().map(rowToTask);
+    if (source === null || source === undefined) {
+      return tasks;
+    }
+    const normalizedSource = sourceId({ source });
+    return tasks.filter((task) => task.source === normalizedSource);
+  }
+
   function markAllNotCurrent(timestamp) {
-    markNotCurrent.run(String(timestamp));
+    markNotCurrent.run(normalizeTimestampForStorage(timestamp));
   }
 
   function markSourceNotCurrent(source, timestamp) {
-    markSourceNotCurrentStatement.run(String(timestamp), sourceId({ source }));
+    markSourceNotCurrentStatement.run(
+      normalizeTimestampForStorage(timestamp),
+      sourceId({ source }),
+    );
   }
 
   function saveBaseline(tasks, timestamp, { source = null } = {}) {
-    const now = String(timestamp);
+    const now = normalizeTimestampForStorage(timestamp);
     const taskSource = source
       ? sourceId({ source })
       : sourceId(tasks[0] ?? {});
     database.exec('BEGIN');
     try {
-      for (const task of tasks) {
-        assertTask(task);
-        const existing = findMatch(task);
+      for (const { task, previous } of findMatches(tasks)) {
+        const existing = previous;
         if (existing) {
           continue;
         }
@@ -424,10 +638,47 @@ export function createHomeworkDatabase({ filePath } = {}) {
     saveBaseline(tasks, timestamp, { source: 'eschool' });
   }
 
-  function upsertSeenTask(task, { timestamp, notificationKind = null } = {}) {
+  function applyProviderSnapshot(plan, timestamp, { source } = {}) {
+    const now = normalizeTimestampForStorage(timestamp ?? new Date());
+    const taskSource = sourceId({ source: source ?? plan[0]?.task?.source });
+    database.exec('BEGIN');
+    try {
+      markSourceNotCurrentStatement.run(now, taskSource);
+      const rows = [];
+      for (const entry of plan) {
+        const row = upsertSeenTask(entry.task, {
+          timestamp: now,
+          notificationKind: entry.notificationKind ?? null,
+          previous: entry.previous ?? null,
+        });
+        rows.push(row);
+      }
+      database.exec('COMMIT');
+      return rows;
+    } catch (error) {
+      try {
+        database.exec('ROLLBACK');
+      } catch {
+        // Preserve the original transaction error.
+      }
+      if (error instanceof HomeworkDatabaseError) {
+        throw error;
+      }
+      throw new HomeworkDatabaseError(
+        `Could not save ${taskSource} snapshot: ${errorMessage(error)}`,
+        { cause: error },
+      );
+    }
+  }
+
+  function upsertSeenTask(task, {
+    timestamp,
+    notificationKind = null,
+    previous = undefined,
+  } = {}) {
     assertTask(task);
-    const now = String(timestamp ?? new Date().toISOString());
-    const existing = findMatch(task);
+    const now = normalizeTimestampForStorage(timestamp ?? new Date());
+    const existing = previous === undefined ? findMatch(task) : previous;
     const pending = notificationKind ? 1 : 0;
 
     try {
@@ -476,7 +727,7 @@ export function createHomeworkDatabase({ filePath } = {}) {
   }
 
   function recordNotificationSuccess(id, timestamp) {
-    const now = String(timestamp ?? new Date().toISOString());
+    const now = normalizeTimestampForStorage(timestamp ?? new Date());
     try {
       markNotified.run(now, now, Number(id));
       return findById(id);
@@ -494,7 +745,7 @@ export function createHomeworkDatabase({ filePath } = {}) {
       return null;
     }
 
-    const now = String(timestamp);
+    const now = normalizeTimestampForStorage(timestamp, 'completed_at');
     try {
       markCompleted.run(now, now, Number(id));
       return findById(id);
@@ -512,7 +763,7 @@ export function createHomeworkDatabase({ filePath } = {}) {
       return null;
     }
 
-    const now = String(timestamp);
+    const now = normalizeTimestampForStorage(timestamp, 'updated_at');
     try {
       const result = markUncompleted.run(now, Number(id));
       return Number(result.changes) > 0 ? findById(id) : null;
@@ -525,7 +776,7 @@ export function createHomeworkDatabase({ filePath } = {}) {
   }
 
   function deleteCompletedBefore(cutoffTimestamp) {
-    const cutoff = String(cutoffTimestamp);
+    const cutoff = normalizeTimestampForStorage(cutoffTimestamp, 'cleanup cutoff');
     try {
       const result = deleteCompletedBeforeStatement.run(cutoff);
       return Number(result.changes ?? 0);
@@ -547,16 +798,20 @@ export function createHomeworkDatabase({ filePath } = {}) {
     countBySource,
     getMeta,
     setMeta,
+    getMigrationDiagnostics,
     findById,
     findByFingerprint,
     findByExternalId,
+    findMatches,
     findMatch,
     currentTasks,
     completedTasks,
+    pendingNotifications,
     markAllNotCurrent,
     markSourceNotCurrent,
     saveBaseline,
     importLegacyState,
+    applyProviderSnapshot,
     upsertSeenTask,
     recordNotificationSuccess,
     completeTask,

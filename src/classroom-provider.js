@@ -177,6 +177,7 @@ export async function getClassroomWebHomeworks(
   {
     cutoff = CLASSROOM_IMPORT_CUTOFF,
     logger = () => {},
+    signal,
   } = {},
 ) {
   if (!client || typeof client.getCourses !== 'function'
@@ -184,14 +185,14 @@ export async function getClassroomWebHomeworks(
     throw new ConfigError('Classroom web client is required');
   }
 
-  const courses = await client.getCourses();
+  const courses = await client.getCourses({ signal });
   const tasks = [];
   const seenExternalIds = new Set();
   let fetchedAssignments = 0;
   let ignoredAssignments = 0;
 
   for (const course of courses) {
-    const assignments = await client.getCourseWorkForCourse(course.courseId);
+    const assignments = await client.getCourseWorkForCourse(course.courseId, { signal });
     for (const assignment of assignments) {
       fetchedAssignments += 1;
       if (!isClassroomAssignmentAfterCutoff(assignment, { cutoff })) {

@@ -84,9 +84,39 @@ test('Telegram menu lists current tasks and completion moves one to history', as
 
     assert.equal(context.database.currentTasks().length, 0);
     assert.equal(context.database.completedTasks().length, 1);
+    assert.equal(
+      context.database.completedTasks()[0].completedAt,
+      '2026-09-09T12:00:00.000Z',
+    );
     const refreshedCall = context.telegram.calls.at(-1);
     assert.match(refreshedCall.args[0], /Наразі немає невиконаних завдань/);
     assert.equal(refreshedCall.args[1].replyMarkup.inline_keyboard[0][0].callback_data, 'menu:main');
+  } finally {
+    context.database.close();
+  }
+});
+
+test('Telegram completion callback stores a UTC date that cleanup can expire', async () => {
+  const context = createBotContext();
+
+  try {
+    await context.bot.handleUpdate({
+      callback_query: {
+        id: 'callback-date-cleanup',
+        data: 'complete:1',
+        message: { message_id: 50, chat: { id: 123 } },
+      },
+    });
+
+    assert.equal(
+      context.database.completedTasks()[0].completedAt,
+      '2026-09-09T12:00:00.000Z',
+    );
+    assert.equal(
+      context.database.deleteCompletedBefore(new Date('2026-09-23T12:00:00.000Z')),
+      1,
+    );
+    assert.equal(context.database.completedTasks().length, 0);
   } finally {
     context.database.close();
   }
@@ -276,11 +306,206 @@ test('bot startup registers commands and enables the Telegram Menu button', asyn
     await bot.start();
     assert.deepEqual(calls.slice(0, 2), ['getMe', 'deleteWebhook']);
     assert.equal(calls.some((call) => call.method === 'setMyCommands'), true);
-    assert.deepEqual(
-      calls.find((call) => call.method === 'setChatMenuButton').options,
-      { menuButton: { type: 'commands' } },
-    );
+    const menuCall = calls.find((call) => call.method === 'setChatMenuButton');
+    assert.deepEqual(menuCall.options.menuButton, { type: 'commands' });
+    assert.ok(menuCall.options.signal instanceof AbortSignal);
   } finally {
+    database.close();
+  }
+});
+
+test('stop requested during startup prevents later setup and initial sync', async () => {
+  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const calls = [];
+  let releaseGetMe;
+  let getMeStarted;
+  const getMeGate = new Promise((resolve) => {
+    releaseGetMe = resolve;
+  });
+  const getMeStartedGate = new Promise((resolve) => {
+    getMeStarted = resolve;
+  });
+  let syncCalls = 0;
+  const telegram = {
+    async getMe() {
+      calls.push('getMe');
+      getMeStarted();
+      await getMeGate;
+      return {};
+    },
+    async deleteWebhook() {
+      calls.push('deleteWebhook');
+      return true;
+    },
+    async getUpdates() {
+      calls.push('getUpdates');
+      return [];
+    },
+  };
+  const bot = createTelegramBot({
+    auth: {},
+    telegram,
+    database,
+    allowedChatId: '123',
+    syncFn: async () => {
+      syncCalls += 1;
+      return {};
+    },
+    logger: () => {},
+  });
+
+  try {
+    const startPromise = bot.start();
+    await getMeStartedGate;
+    bot.stop();
+    releaseGetMe();
+    await startPromise;
+    assert.deepEqual(calls, ['getMe']);
+    assert.equal(syncCalls, 0);
+    assert.equal(bot.isRunning(), false);
+  } finally {
+    releaseGetMe();
+    bot.stop();
+    database.close();
+  }
+});
+
+test('startup request cancellation is treated as a graceful stop', async () => {
+  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  let getMeStarted;
+  const started = new Promise((resolve) => {
+    getMeStarted = resolve;
+  });
+  const telegram = {
+    async getMe({ signal }) {
+      getMeStarted();
+      await new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => {
+          const error = new Error('request aborted');
+          error.code = 'TELEGRAM_ABORTED';
+          reject(error);
+        }, { once: true });
+      });
+    },
+    async deleteWebhook() {
+      throw new Error('deleteWebhook should not run after cancellation');
+    },
+  };
+  const bot = createTelegramBot({
+    auth: {},
+    telegram,
+    database,
+    allowedChatId: '123',
+    syncFn: async () => {
+      throw new Error('sync should not run after cancellation');
+    },
+    logger: () => {},
+  });
+
+  try {
+    const startPromise = bot.start();
+    await started;
+    bot.stop();
+    await assert.doesNotReject(startPromise);
+    assert.equal(bot.isRunning(), false);
+  } finally {
+    bot.stop();
+    database.close();
+  }
+});
+
+test('stop during startup setup prevents later menu and sync actions', async () => {
+  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const calls = [];
+  let bot;
+  const telegram = {
+    async getMe() {
+      calls.push('getMe');
+      return {};
+    },
+    async deleteWebhook() {
+      calls.push('deleteWebhook');
+      return true;
+    },
+    async setMyCommands() {
+      calls.push('setMyCommands');
+      bot.stop();
+      return true;
+    },
+    async setChatMenuButton() {
+      throw new Error('menu setup should not run after stop');
+    },
+  };
+  bot = createTelegramBot({
+    auth: {},
+    telegram,
+    database,
+    allowedChatId: '123',
+    syncFn: async () => {
+      throw new Error('sync should not run after stop');
+    },
+    logger: () => {},
+  });
+
+  try {
+    await bot.start();
+    assert.deepEqual(calls, ['getMe', 'deleteWebhook', 'setMyCommands']);
+    assert.equal(bot.isRunning(), false);
+  } finally {
+    bot.stop();
+    database.close();
+  }
+});
+
+test('bot stop aborts the active sync before closing its lifecycle', async () => {
+  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  let bot;
+  let syncStarted;
+  const syncStartedGate = new Promise((resolve) => {
+    syncStarted = resolve;
+  });
+  let signalSeen;
+  let releaseSync;
+  const telegram = {
+    async getMe() {
+      return {};
+    },
+    async deleteWebhook() {
+      return true;
+    },
+    async getUpdates({ signal }) {
+      await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }));
+      return [];
+    },
+  };
+
+  bot = createTelegramBot({
+    auth: {},
+    telegram,
+    database,
+    allowedChatId: '123',
+    syncFn: async ({ signal }) => {
+      signalSeen = signal;
+      syncStarted();
+      await new Promise((resolve) => {
+        releaseSync = resolve;
+        signal.addEventListener('abort', resolve, { once: true });
+      });
+      return {};
+    },
+    logger: () => {},
+  });
+
+  try {
+    const startPromise = bot.start();
+    await syncStartedGate;
+    bot.stop();
+    await startPromise;
+    assert.ok(signalSeen instanceof AbortSignal);
+    assert.equal(signalSeen.aborted, true);
+  } finally {
+    releaseSync?.();
+    bot.stop();
     database.close();
   }
 });

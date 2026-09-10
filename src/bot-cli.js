@@ -35,7 +35,6 @@ async function main() {
   process.once('SIGTERM', shutdown);
 
   try {
-    await auth.fullLogin();
     await bot.start();
   } finally {
     database.close();

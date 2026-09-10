@@ -24,6 +24,62 @@ test('sendTelegramMessage calls Telegram Bot API and returns result', async () =
   assert.ok(calls[0].options.signal instanceof AbortSignal);
 });
 
+test('Telegram request combines caller cancellation with its own deadline', async () => {
+  const externalController = new AbortController();
+  let requestSignal;
+  const client = createTelegramClient({
+    token: 'test-token',
+    chatId: '12345',
+    timeoutMs: 20,
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    },
+  });
+
+  const request = client.getUpdates({
+    offset: 1,
+    timeoutSeconds: 1,
+    requestTimeoutMs: 20,
+    signal: externalController.signal,
+  });
+  try {
+    await assert.rejects(
+      Promise.race([
+        request,
+        new Promise((_, reject) => setTimeout(() => reject(new Error('deadline missing')), 80)),
+      ]),
+      (error) => error.code === 'TELEGRAM_TIMEOUT',
+    );
+    assert.notEqual(requestSignal, externalController.signal);
+    assert.equal(requestSignal.aborted, true);
+    assert.equal(externalController.signal.aborted, false);
+  } finally {
+    externalController.abort();
+    await request.catch(() => {});
+  }
+});
+
+test('Telegram network errors do not retain token-bearing URL causes', async () => {
+  const marker = 'TELEGRAM_URL_SECRET_MARKER';
+  const client = createTelegramClient({
+    token: 'test-token',
+    chatId: '12345',
+    fetchImpl: async (url) => {
+      throw new Error(`fetch failed for ${url}?marker=${marker}`);
+    },
+  });
+
+  await assert.rejects(
+    client.sendTelegramMessage('hello'),
+    (error) => error.code === 'TELEGRAM_NETWORK_ERROR'
+      && !error.message.includes(marker)
+      && !error.cause,
+  );
+});
+
 test('Telegram 429 is logged and returned as a bounded error', async () => {
   const logs = [];
   const client = createTelegramClient({

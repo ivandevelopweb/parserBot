@@ -76,3 +76,32 @@ test('Google credential and token files are parsed and saved without exposing to
     await rm(directory, { recursive: true, force: true });
   }
 });
+
+test('Google credential and token JSON errors do not expose file paths or parser details', async () => {
+  const marker = 'GOOGLE_FILE_SECRET_MARKER';
+  const directory = await mkdtemp(join(tmpdir(), `classroom-auth-${marker}-`));
+  const credentialsPath = join(directory, 'google-credentials.json');
+  const tokenPath = join(directory, 'google-token.json');
+
+  try {
+    await writeFile(credentialsPath, `{"broken":"${marker}"`);
+    assert.throws(
+      () => readGoogleClientCredentials(credentialsPath),
+      (error) => error.message === 'Could not parse Google OAuth credentials file as JSON.'
+        && !error.message.includes(marker),
+    );
+
+    await writeFile(tokenPath, `{"broken":"${marker}"`);
+    assert.throws(
+      () => createClassroomAuth({
+        env: {},
+        tokenPath,
+        credentialsPath: null,
+      }),
+      (error) => error.message === 'Could not parse Google OAuth token file as JSON.'
+        && !error.message.includes(marker),
+    );
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});

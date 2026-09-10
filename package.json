@@ -5,7 +5,7 @@
   "description": "Browserless Node.js smoke-test client for the Єдина школа service",
   "type": "module",
   "engines": {
-    "node": ">=22.5"
+    "node": ">=24.21.0 <25"
   },
   "scripts": {
     "start": "node src/index.js",

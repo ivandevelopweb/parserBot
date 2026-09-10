@@ -96,6 +96,75 @@ test('Classroom Cookie header parser accepts ordinary pairs and values containin
   assert.match(cookieString, /PREF=one=two/);
 });
 
+test('Classroom cookie JSON errors use stable text without input or parser details', () => {
+  const marker = 'COOKIE_JSON_SECRET_MARKER';
+
+  assert.throws(
+    () => parseClassroomCookies(`{"broken":"${marker}"`),
+    (error) => error.message === 'Could not parse Classroom cookies JSON.'
+      && !error.message.includes(marker),
+  );
+});
+
+test('raw Classroom Cookie headers reject control characters before fetch or Headers.set', () => {
+  const marker = 'COOKIE_HEADER_SECRET_MARKER';
+  let fetchCalls = 0;
+
+  assert.throws(
+    () => createClassroomWebClient({
+      env: { CLASSROOM_COOKIE_HEADER: `SID=sid-value\r\nX-Leak: ${marker}` },
+      fetchImpl: async () => {
+        fetchCalls += 1;
+        return new Response('unexpected');
+      },
+    }),
+    (error) => error.message === 'Classroom Cookie header contains invalid characters.'
+      && !error.message.includes(marker),
+  );
+  assert.equal(fetchCalls, 0);
+
+  assert.throws(
+    () => parseClassroomCookieHeader(`SID=sid-value\nX-Leak=${marker}`),
+    (error) => error.message === 'Classroom Cookie header contains invalid characters.'
+      && !error.message.includes(marker),
+  );
+});
+
+test('Classroom network errors expose only a safe status to callers and logs', async () => {
+  const marker = 'NETWORK_ERROR_SECRET_MARKER';
+  const client = createClassroomWebClient({
+    env: { CLASSROOM_COOKIE_HEADER: 'SID=sid-value' },
+    fetchImpl: async () => {
+      throw new Error(`fetch failed for https://classroom.google.com/?at=${marker}`);
+    },
+  });
+
+  await assert.rejects(
+    client.getAuthenticatedPage(),
+    (error) => error.code === 'CLASSROOM_NETWORK_ERROR'
+      && error.message === 'Classroom request failed due to a network error.'
+      && !error.message.includes(marker)
+      && !error.cause,
+  );
+});
+
+test('Classroom cookie jar reports a safe indexed configuration error', async () => {
+  const marker = 'COOKIE_VALUE_SECRET_MARKER';
+
+  await assert.rejects(
+    createClassroomCookieJar({
+      cookies: [{
+        name: marker,
+        value: marker,
+        domain: 'not-classroom.example',
+      }],
+    }),
+    (error) => error.message === 'Could not load Classroom cookie #1. Check the cookie export format.'
+      && !error.message.includes(marker)
+      && error.name === 'ConfigError',
+  );
+});
+
 test('raw Classroom Cookie header is sent unchanged on the first GET before jar import', async () => {
   const rawHeader = 'SID=sid-value; PREF=one=two';
   const calls = [];
@@ -574,6 +643,63 @@ test('authenticated Classroom page is cached and extracts bootstrap once', async
   assert.equal(second.bootstrap.bl, BOOTSTRAP.bl);
 });
 
+test('Classroom refreshes the cached session once after a session refusal', async () => {
+  let pageLoads = 0;
+  let requestCount = 0;
+  let invalidations = 0;
+  const client = {
+    requestIdFactory: () => '4321',
+    invalidateSession() {
+      invalidations += 1;
+    },
+    async getAuthenticatedPage({ force = false } = {}) {
+      pageLoads += 1;
+      assert.equal(force, pageLoads > 1);
+      return { bootstrap: BOOTSTRAP };
+    },
+    async request() {
+      requestCount += 1;
+      if (requestCount === 1) {
+        return new Response('expired', { status: 401 });
+      }
+      return new Response(
+        batchexecuteResponse(CLASSROOM_RPC_ID, courseWorkPage([], 'done')),
+        { status: 200 },
+      );
+    },
+  };
+
+  assert.deepEqual(await getCourseWorkForCourse(client, 'course-1'), []);
+  assert.equal(pageLoads, 2);
+  assert.equal(requestCount, 2);
+  assert.equal(invalidations, 1);
+});
+
+test('Classroom does not loop after a second session refusal', async () => {
+  let pageLoads = 0;
+  let requestCount = 0;
+  const client = {
+    requestIdFactory: () => '4321',
+    invalidateSession() {},
+    async getAuthenticatedPage({ force = false } = {}) {
+      pageLoads += 1;
+      assert.equal(force, pageLoads > 1);
+      return { bootstrap: BOOTSTRAP };
+    },
+    async request() {
+      requestCount += 1;
+      return new Response('expired', { status: 401 });
+    },
+  };
+
+  await assert.rejects(
+    getCourseWorkForCourse(client, 'course-1'),
+    (error) => error.code === 'CLASSROOM_SESSION_EXPIRED',
+  );
+  assert.equal(pageLoads, 2);
+  assert.equal(requestCount, 2);
+});
+
 test('invalid Classroom session fails with the required re-authentication message', async () => {
   const client = createClassroomWebClient({
     cookies: [{ name: 'SID', value: 'sid-value' }],
@@ -606,6 +732,53 @@ test('Classroom HTTP requests have a timeout', async () => {
     client.getAuthenticatedPage(),
     (error) => error.code === 'CLASSROOM_TIMEOUT',
   );
+});
+
+test('Classroom HTTP timeout remains active while the response body is read', async () => {
+  const client = createClassroomWebClient({
+    cookies: [{ name: 'SID', value: 'sid-value' }],
+    timeoutMs: 10,
+    fetchImpl: async (_url, { signal }) => {
+      const response = new Response('placeholder', { status: 200 });
+      response.text = () => new Promise((resolve, reject) => {
+        const fallback = setTimeout(() => reject(new Error('body deadline missing')), 80);
+        signal.addEventListener('abort', () => {
+          clearTimeout(fallback);
+          reject(new Error('body aborted'));
+        }, { once: true });
+      });
+      return response;
+    },
+  });
+
+  await assert.rejects(
+    client.getAuthenticatedPage(),
+    (error) => error.code === 'CLASSROOM_TIMEOUT',
+  );
+});
+
+test('Classroom request combines external cancellation with its deadline', async () => {
+  const externalController = new AbortController();
+  let requestSignal;
+  const client = createClassroomWebClient({
+    cookies: [{ name: 'SID', value: 'sid-value' }],
+    timeoutMs: 100,
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(new Error('aborted')), { once: true });
+      });
+    },
+  });
+
+  const request = client.getAuthenticatedPage({ signal: externalController.signal });
+  setTimeout(() => externalController.abort(), 10);
+  await assert.rejects(
+    request,
+    (error) => error.code === 'CLASSROOM_ABORTED',
+  );
+  assert.notEqual(requestSignal, externalController.signal);
+  assert.equal(externalController.signal.aborted, true);
 });
 
 test('coursework decoder extracts only explicit coursework fields and attachments', () => {
@@ -663,11 +836,13 @@ test('coursework decoder extracts the confirmed array-only pONvgf record shape',
 });
 
 test('coursework decoder does not invent assignments from unknown numeric arrays', () => {
-  const decoded = decodeCourseWorkPayload(
-    [[100, null, 1, 0], [[1, 2, 3, 4]]],
-    { courseId: '544644036115' },
+  assert.throws(
+    () => decodeCourseWorkPayload(
+      [[100, null, 1, 0], [[1, 2, 3, 4]]],
+      { courseId: '544644036115' },
+    ),
+    (error) => error.code === 'CLASSROOM_RESPONSE_ERROR',
   );
-  assert.deepEqual(decoded, []);
 });
 
 function courseListRecord(courseId, name, marker = 1) {
@@ -693,6 +868,13 @@ function courseWorkPage(records, continuationToken = null) {
     records,
   ];
 }
+
+test('coursework decoder accepts an explicitly valid empty collection', () => {
+  assert.deepEqual(
+    decodeCourseWorkPayload(courseWorkPage([], 'done'), { courseId: 'course-1' }),
+    [],
+  );
+});
 
 test('coursework continuation token is read only from the confirmed response field', () => {
   assert.equal(

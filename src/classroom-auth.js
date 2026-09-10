@@ -7,7 +7,7 @@ import { spawn } from 'node:child_process';
 
 import { google } from 'googleapis';
 
-import { ConfigError, SmokeTestError, errorMessage } from './utils.js';
+import { ConfigError, SmokeTestError } from './utils.js';
 
 export const CLASSROOM_SCOPES = [
   'https://www.googleapis.com/auth/classroom.courses.readonly',
@@ -46,14 +46,14 @@ function readJsonFile(filePath, label) {
   let content;
   try {
     content = readFileSync(filePath, 'utf8');
-  } catch (error) {
-    throw new ConfigError(`Could not read ${label} ${filePath}: ${errorMessage(error)}`);
+  } catch {
+    throw new ConfigError(`Could not read ${label}.`);
   }
 
   try {
     return JSON.parse(content);
-  } catch (error) {
-    throw new ConfigError(`Could not parse ${label} ${filePath} as JSON: ${errorMessage(error)}`);
+  } catch {
+    throw new ConfigError(`Could not parse ${label} as JSON.`);
   }
 }
 
@@ -71,9 +71,7 @@ export function readGoogleClientCredentials(filePath = resolveGoogleCredentialsP
   const redirectUris = Array.isArray(keys?.redirect_uris) ? keys.redirect_uris : [];
 
   if (!hasValue(clientId) || !hasValue(clientSecret)) {
-    throw new ConfigError(
-      `Google OAuth credentials file ${filePath} does not contain client_id and client_secret.`,
-    );
+    throw new ConfigError('Google OAuth credentials file does not contain client_id and client_secret.');
   }
 
   return {
@@ -169,8 +167,8 @@ function getLoopbackRedirectUri(baseUri, port) {
   let redirectUri;
   try {
     redirectUri = new URL(baseUri || 'http://localhost');
-  } catch (error) {
-    throw new ConfigError(`Google OAuth redirect URI is invalid: ${errorMessage(error)}`);
+  } catch {
+    throw new ConfigError('Google OAuth redirect URI is invalid.');
   }
 
   if (redirectUri.protocol !== 'http:' || redirectUri.hostname !== 'localhost') {
@@ -214,10 +212,10 @@ export async function saveGoogleToken({
       flag: 'wx',
     });
     await rename(temporaryPath, tokenPath);
-  } catch (error) {
+  } catch {
     throw new SmokeTestError(
-      `Could not atomically save Google OAuth token ${tokenPath}: ${errorMessage(error)}`,
-      { code: 'CLASSROOM_AUTH_ERROR', cause: error },
+      'Could not atomically save Google OAuth token.',
+      { code: 'CLASSROOM_AUTH_ERROR' },
     );
   } finally {
     try {
@@ -282,7 +280,7 @@ export async function authorizeClassroom({
         if (oauthError) {
           response.statusCode = 400;
           response.end('Google authorization was rejected.');
-          finish(rejectResult, new ConfigError(`Google authorization failed: ${oauthError}`));
+          finish(rejectResult, new ConfigError('Google authorization failed.'));
           return;
         }
 
@@ -313,20 +311,20 @@ export async function authorizeClassroom({
         response.statusCode = 200;
         response.end('Authorization successful. You can return to the terminal.');
         finish(resolveResult, tokens);
-      } catch (error) {
+      } catch {
         response.statusCode = 500;
         response.end('Google authorization failed.');
         finish(rejectResult, new SmokeTestError(
-          `Google OAuth token exchange failed: ${errorMessage(error)}`,
-          { code: 'CLASSROOM_AUTH_ERROR', cause: error },
+          'Google OAuth token exchange failed.',
+          { code: 'CLASSROOM_AUTH_ERROR' },
         ));
       }
     });
 
-    server.once('error', (error) => {
+    server.once('error', () => {
       finish(rejectResult, new SmokeTestError(
-        `Could not start the local Google OAuth callback server: ${errorMessage(error)}`,
-        { code: 'CLASSROOM_AUTH_ERROR', cause: error },
+        'Could not start the local Google OAuth callback server.',
+        { code: 'CLASSROOM_AUTH_ERROR' },
       ));
     });
 

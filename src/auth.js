@@ -142,10 +142,14 @@ export function createAuthClient({
   }
 
   async function request(url, options = {}) {
+    const timeoutSignal = AbortSignal.timeout(DEFAULT_HTTP_TIMEOUT_MS);
+    const signal = options.signal
+      ? AbortSignal.any([options.signal, timeoutSignal])
+      : timeoutSignal;
     return fetchWithCookies(url, {
       redirect: 'follow',
-      signal: options.signal ?? AbortSignal.timeout(DEFAULT_HTTP_TIMEOUT_MS),
       ...options,
+      signal,
     });
   }
 
@@ -165,13 +169,14 @@ export function createAuthClient({
     };
   }
 
-  async function fullLogin({ logOutput = true } = {}) {
+  async function fullLogin({ logOutput = true, signal } = {}) {
     const credentials = getCredentials();
     log('[auth] Fetching login page...', logOutput);
 
     const loginPageResponse = await request(LOGIN_URL, {
       method: 'GET',
       headers: addRedirectSafeHeaders({}, ORIGIN),
+      signal,
     });
 
     const loginHtml = await loginPageResponse.text();
@@ -208,6 +213,7 @@ export function createAuthClient({
         referer: LOGIN_URL,
       },
       body,
+      signal,
     });
 
     // Consume the final response so the underlying connection can be reused.
@@ -244,10 +250,11 @@ export function createAuthClient({
     return cookiePresence;
   }
 
-  async function refreshSession({ logOutput = true } = {}) {
+  async function refreshSession({ logOutput = true, signal } = {}) {
     const response = await request(PORTAL_URL, {
       method: 'GET',
       headers: addRedirectSafeHeaders({}, LOGIN_URL),
+      signal,
     });
 
     await response.arrayBuffer();

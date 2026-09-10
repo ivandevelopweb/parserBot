@@ -77,7 +77,7 @@ export function buildHomeworkWebUrl(homeworkId) {
   return new URL(`/homework/${encodeURIComponent(normalizedId)}`, DIARY_ORIGIN).toString();
 }
 
-export async function initializeDiarySession(auth, { force = false } = {}) {
+export async function initializeDiarySession(auth, { force = false, signal } = {}) {
   if (!auth || typeof auth.fetch !== 'function') {
     throw new SmokeTestError('initializeDiarySession requires an auth client');
   }
@@ -95,6 +95,7 @@ export async function initializeDiarySession(auth, { force = false } = {}) {
   const probeResponse = await auth.fetch(DIARY_LOGIN_URL, {
     method: 'GET',
     headers: { accept: 'application/json' },
+    signal,
   });
   const probeText = await probeResponse.text();
 
@@ -136,6 +137,7 @@ export async function initializeDiarySession(auth, { force = false } = {}) {
       'content-type': 'application/json',
     },
     body: JSON.stringify(binding),
+    signal,
   });
   const bindText = await bindResponse.text();
 
@@ -320,14 +322,15 @@ function isSessionExpired(status, responseText) {
   );
 }
 
-async function requestAppointments(auth, url, { forceDiarySession = false } = {}) {
-  await initializeDiarySession(auth, { force: forceDiarySession });
+async function requestAppointments(auth, url, { forceDiarySession = false, signal } = {}) {
+  await initializeDiarySession(auth, { force: forceDiarySession, signal });
 
   const response = await auth.fetch(url, {
     method: 'GET',
     headers: {
       accept: 'application/json',
     },
+    signal,
   });
 
   const responseText = await response.text();
@@ -359,12 +362,15 @@ async function requestAppointments(auth, url, { forceDiarySession = false } = {}
   }
 }
 
-async function runRecoveryLogin(auth, log) {
+async function runRecoveryLogin(auth, log, signal) {
   log('[eschool] Portal refresh failed; performing full login...');
   try {
-    await auth.fullLogin();
-    await initializeDiarySession(auth, { force: true });
+    await auth.fullLogin({ signal });
+    await initializeDiarySession(auth, { force: true, signal });
   } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     throw new SmokeTestError(
       `Appointment API recovery full login failed: ${errorMessage(error)}`,
       { code: 'APPOINTMENT_RECOVERY_ERROR', cause: error },
@@ -374,7 +380,14 @@ async function runRecoveryLogin(auth, log) {
 
 export async function getAppointments(
   auth,
-  { start, end, now = new Date(), timeZone = TIME_ZONE, logger = console.log } = {},
+  {
+    start,
+    end,
+    now = new Date(),
+    timeZone = TIME_ZONE,
+    logger = console.log,
+    signal,
+  } = {},
 ) {
   if (!auth || typeof auth.fetch !== 'function') {
     throw new SmokeTestError('getAppointments requires an auth client');
@@ -388,7 +401,7 @@ export async function getAppointments(
 
   let appointments;
   try {
-    appointments = await requestAppointments(auth, url);
+    appointments = await requestAppointments(auth, url, { signal });
   } catch (firstError) {
     if (!firstError.sessionExpired) {
       throw firstError;
@@ -397,26 +410,29 @@ export async function getAppointments(
     log('[eschool] Session expired; refreshing through /portal...');
     let portalRefreshWorked = true;
     try {
-      await auth.refreshSession({ logOutput: false });
-      await initializeDiarySession(auth, { force: true });
-    } catch {
+      await auth.refreshSession({ logOutput: false, signal });
+      await initializeDiarySession(auth, { force: true, signal });
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
       portalRefreshWorked = false;
     }
 
     if (!portalRefreshWorked) {
-      await runRecoveryLogin(auth, log);
+      await runRecoveryLogin(auth, log, signal);
     }
 
     try {
-      appointments = await requestAppointments(auth, url);
+      appointments = await requestAppointments(auth, url, { signal });
     } catch (retryError) {
       if (!retryError.sessionExpired || !portalRefreshWorked) {
         throw retryError;
       }
 
       log('[eschool] Refresh retry still unauthorized; performing full login...');
-      await runRecoveryLogin(auth, log);
-      appointments = await requestAppointments(auth, url);
+      await runRecoveryLogin(auth, log, signal);
+      appointments = await requestAppointments(auth, url, { signal });
     }
   }
 

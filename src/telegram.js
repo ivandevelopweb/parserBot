@@ -44,6 +44,42 @@ function getNetworkErrorMessage(error) {
   return error?.cause?.code ?? error?.code ?? 'network error';
 }
 
+function createRequestDeadline(externalSignal, timeoutMs) {
+  const controller = new AbortController();
+  let timedOut = false;
+  let externallyAborted = false;
+  let abortListener;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  timeout.unref?.();
+
+  if (externalSignal) {
+    abortListener = () => {
+      externallyAborted = true;
+      controller.abort(externalSignal.reason);
+    };
+    if (externalSignal.aborted) {
+      abortListener();
+    } else {
+      externalSignal.addEventListener('abort', abortListener, { once: true });
+    }
+  }
+
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    wasExternallyAborted: () => externallyAborted,
+    cleanup() {
+      clearTimeout(timeout);
+      if (abortListener && externalSignal) {
+        externalSignal.removeEventListener('abort', abortListener);
+      }
+    },
+  };
+}
+
 export function createTelegramClient({
   token = process.env.TELEGRAM_BOT_TOKEN,
   chatId = process.env.TELEGRAM_CHAT_ID,
@@ -58,64 +94,83 @@ export function createTelegramClient({
   async function call(method, payload = {}, { requestTimeoutMs = timeoutMs, signal } = {}) {
     const config = getRequiredConfig(token, chatId);
     const url = `${TELEGRAM_API_ORIGIN}/bot${config.token}/${method}`;
+    const requestDeadline = createRequestDeadline(signal, requestTimeoutMs);
 
-    let response;
     try {
-      response = await fetchImpl(url, {
+      const response = await fetchImpl(url, {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
         body: JSON.stringify(payload),
-        signal: signal ?? AbortSignal.timeout(requestTimeoutMs),
+        signal: requestDeadline.signal,
       });
-    } catch (error) {
-      throw new TelegramError(
-        `Telegram ${method} request failed: ${getNetworkErrorMessage(error)}`,
-        { code: 'TELEGRAM_NETWORK_ERROR', cause: error },
-      );
-    }
 
-    let responsePayload;
-    const responseText = await response.text();
-    try {
-      responsePayload = responseText ? JSON.parse(responseText) : null;
-    } catch (error) {
-      throw new TelegramError(
-        `Telegram ${method} returned invalid JSON (HTTP ${response.status})`,
-        { status: response.status, code: 'TELEGRAM_RESPONSE_ERROR', cause: error },
-      );
-    }
-
-    const description = responsePayload?.description;
-    if (!response.ok || responsePayload?.ok !== true) {
-      const retryAfter = responsePayload?.parameters?.retry_after;
-      if (response.status === 429) {
-        logger(
-          `[telegram] HTTP 429 Too Many Requests${retryAfter ? `; retry_after=${retryAfter}s` : ''}`,
+      const responseText = await response.text();
+      let responsePayload;
+      try {
+        responsePayload = responseText ? JSON.parse(responseText) : null;
+      } catch (error) {
+        throw new TelegramError(
+          `Telegram ${method} returned invalid JSON (HTTP ${response.status})`,
+          { status: response.status, code: 'TELEGRAM_RESPONSE_ERROR', cause: error },
         );
       }
 
-      const suffix = description ? `: ${description}` : '';
-      throw new TelegramError(
-        `Telegram ${method} failed with HTTP ${response.status} ${response.statusText}${suffix}`.trim(),
-        {
-          status: response.status,
-          retryAfter,
-          code: response.status === 429 ? 'TELEGRAM_RATE_LIMIT' : 'TELEGRAM_API_ERROR',
-        },
-      );
-    }
+      const description = responsePayload?.description;
+      if (!response.ok || responsePayload?.ok !== true) {
+        const retryAfter = responsePayload?.parameters?.retry_after;
+        if (response.status === 429) {
+          logger(
+            `[telegram] HTTP 429 Too Many Requests${retryAfter ? `; retry_after=${retryAfter}s` : ''}`,
+          );
+        }
 
-    return responsePayload.result;
+        const suffix = description ? `: ${description}` : '';
+        throw new TelegramError(
+          `Telegram ${method} failed with HTTP ${response.status} ${response.statusText}${suffix}`.trim(),
+          {
+            status: response.status,
+            retryAfter,
+            code: response.status === 429 ? 'TELEGRAM_RATE_LIMIT' : 'TELEGRAM_API_ERROR',
+          },
+        );
+      }
+
+      return responsePayload.result;
+    } catch (error) {
+      if (error instanceof TelegramError) {
+        throw error;
+      }
+      if (requestDeadline.didTimeout()) {
+        throw new TelegramError(
+          `Telegram ${method} request timed out after ${requestTimeoutMs} ms`,
+          { code: 'TELEGRAM_TIMEOUT' },
+        );
+      }
+      if (requestDeadline.wasExternallyAborted()) {
+        throw new TelegramError(
+          `Telegram ${method} request was cancelled`,
+          { code: 'TELEGRAM_ABORTED' },
+        );
+      }
+      throw new TelegramError(
+        `Telegram ${method} request failed: ${getNetworkErrorMessage(error)}`,
+        { code: 'TELEGRAM_NETWORK_ERROR' },
+      );
+    } finally {
+      requestDeadline.cleanup();
+    }
   }
 
-  async function getMe() {
-    return call('getMe');
+  async function getMe({ signal, requestTimeoutMs } = {}) {
+    return call('getMe', {}, { signal, requestTimeoutMs });
   }
 
   async function sendTelegramMessage(text, {
     replyMarkup,
     disableWebPagePreview,
     parseMode,
+    signal,
+    requestTimeoutMs,
   } = {}) {
     validateMessage(text);
     const payload = { chat_id: chatId, text };
@@ -128,7 +183,7 @@ export function createTelegramClient({
     if (parseMode !== undefined) {
       payload.parse_mode = parseMode;
     }
-    return call('sendMessage', payload);
+    return call('sendMessage', payload, { signal, requestTimeoutMs });
   }
 
   async function editTelegramMessage(text, {
@@ -136,6 +191,8 @@ export function createTelegramClient({
     replyMarkup,
     targetChatId = chatId,
     parseMode,
+    signal,
+    requestTimeoutMs,
   } = {}) {
     validateMessage(text);
     if (messageId === undefined || messageId === null) {
@@ -155,12 +212,14 @@ export function createTelegramClient({
     if (parseMode !== undefined) {
       payload.parse_mode = parseMode;
     }
-    return call('editMessageText', payload);
+    return call('editMessageText', payload, { signal, requestTimeoutMs });
   }
 
   async function answerCallbackQuery(callbackQueryId, {
     text,
     showAlert = false,
+    signal,
+    requestTimeoutMs,
   } = {}) {
     if (!callbackQueryId) {
       throw new TelegramError('Telegram answerCallbackQuery requires callbackQueryId', {
@@ -175,7 +234,7 @@ export function createTelegramClient({
     if (showAlert) {
       payload.show_alert = true;
     }
-    return call('answerCallbackQuery', payload);
+    return call('answerCallbackQuery', payload, { signal, requestTimeoutMs });
   }
 
   async function getUpdates({
@@ -183,6 +242,7 @@ export function createTelegramClient({
     timeoutSeconds = 25,
     allowedUpdates = ['message', 'callback_query'],
     signal,
+    requestTimeoutMs,
   } = {}) {
     const payload = {
       timeout: timeoutSeconds,
@@ -193,34 +253,40 @@ export function createTelegramClient({
     }
 
     return call('getUpdates', payload, {
-      requestTimeoutMs: Math.max(timeoutMs, (Number(timeoutSeconds) + 5) * 1000),
+      requestTimeoutMs: requestTimeoutMs ?? Math.max(timeoutMs, (Number(timeoutSeconds) + 5) * 1000),
       signal,
     });
   }
 
-  async function deleteWebhook({ dropPendingUpdates = false } = {}) {
-    return call('deleteWebhook', { drop_pending_updates: dropPendingUpdates });
+  async function deleteWebhook({ dropPendingUpdates = false, signal, requestTimeoutMs } = {}) {
+    return call(
+      'deleteWebhook',
+      { drop_pending_updates: dropPendingUpdates },
+      { signal, requestTimeoutMs },
+    );
   }
 
-  async function setMyCommands(commands) {
+  async function setMyCommands(commands, { signal, requestTimeoutMs } = {}) {
     if (!Array.isArray(commands) || commands.length === 0) {
       throw new TelegramError('Telegram setMyCommands requires a non-empty commands array', {
         code: 'TELEGRAM_COMMANDS_ERROR',
       });
     }
 
-    return call('setMyCommands', { commands });
+    return call('setMyCommands', { commands }, { signal, requestTimeoutMs });
   }
 
   async function setChatMenuButton({
     menuButton = { type: 'commands' },
     targetChatId = chatId,
+    signal,
+    requestTimeoutMs,
   } = {}) {
     const payload = { menu_button: menuButton };
     if (targetChatId !== undefined && targetChatId !== null && targetChatId !== '') {
       payload.chat_id = targetChatId;
     }
-    return call('setChatMenuButton', payload);
+    return call('setChatMenuButton', payload, { signal, requestTimeoutMs });
   }
 
   return {

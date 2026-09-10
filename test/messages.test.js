@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { formatHomeworkList, formatHomeworkMessage } from '../src/messages.js';
+import { MAX_TELEGRAM_MESSAGE_LENGTH } from '../src/telegram.js';
 
 test('formatHomeworkMessage builds the requested Ukrainian notification', () => {
   const message = formatHomeworkMessage({
@@ -195,4 +196,51 @@ test('Classroom homework without a due date is shown last with an explicit label
     }),
     /📅 Дата здачі не вказана/
   );
+});
+
+test('long Classroom notifications are shortened without breaking HTML and keep a safe link', () => {
+  const longText = '&<>'.repeat(1800) + ' 😀';
+  const message = formatHomeworkMessage({
+    source: 'classroom',
+    snapshot: {
+      source: 'classroom',
+      subject: longText,
+      title: longText,
+      description: longText,
+       topics: [longText, longText],
+       targetDate: '2026-09-11',
+       lessonNumber: '<1>',
+       startTime: '10:00 & <x>',
+       url: 'https://classroom.google.com/c/course-1/a/work-1/details',
+    },
+  });
+
+  assert.ok(message.length <= MAX_TELEGRAM_MESSAGE_LENGTH);
+  assert.match(message, /скорочено/i);
+  assert.match(
+    message,
+    /<a href="https:\/\/classroom\.google\.com\/c\/course-1\/a\/work-1\/details">Відкрити повне завдання<\/a>/,
+  );
+  assert.match(message, /Урок &lt;1&gt;/);
+  assert.match(message, /10:00 &amp; &lt;x&gt;/);
+  assert.equal((message.match(/<a\b/g) ?? []).length, (message.match(/<\/a>/g) ?? []).length);
+  assert.doesNotMatch(message, /<(?:a|\/a)\b[^>]*$/);
+  assert.doesNotMatch(message, /&(?:amp|lt|gt|quot)?$/);
+});
+
+test('long URLs are omitted when they cannot fit instead of corrupting HTML', () => {
+  const message = formatHomeworkMessage({
+    source: 'classroom',
+    snapshot: {
+      source: 'classroom',
+      title: 'Завдання',
+      description: 'Опис',
+      url: `https://classroom.google.com/c/course-1/a/work-1/details?q=${'x'.repeat(5000)}`,
+    },
+  });
+
+  assert.ok(message.length <= MAX_TELEGRAM_MESSAGE_LENGTH);
+  assert.match(message, /скорочено/i);
+  assert.doesNotMatch(message, /<a\b/);
+  assert.doesNotMatch(message, /<\/a>/);
 });

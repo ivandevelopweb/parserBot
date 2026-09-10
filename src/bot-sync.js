@@ -13,6 +13,26 @@ export const COMPLETED_TASK_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 export const ESCHOOL_SOURCE = 'eschool';
 export const CLASSROOM_SOURCE = 'classroom';
 
+const loggedInEschoolClients = new WeakSet();
+
+function throwIfAborted(signal) {
+  if (!signal?.aborted) {
+    return;
+  }
+  const error = new Error('Sync was cancelled');
+  error.name = 'AbortError';
+  throw error;
+}
+
+async function ensureEschoolAuth(auth, signal) {
+  throwIfAborted(signal);
+  if (typeof auth?.fullLogin !== 'function' || loggedInEschoolClients.has(auth)) {
+    return;
+  }
+  await auth.fullLogin({ signal });
+  loggedInEschoolClients.add(auth);
+}
+
 function getTasksFromProviderResult(result, source) {
   let tasks;
   if (Array.isArray(result)) {
@@ -30,11 +50,23 @@ function getTasksFromProviderResult(result, source) {
     );
   }
 
-  return tasks.map((task) => {
+  const normalizedTasks = tasks.map((task) => {
     if (task?.snapshot && task?.fingerprint) {
       return task;
     }
     return toSyncTask({ ...task, source });
+  });
+
+  const seenIdentities = new Set();
+  return normalizedTasks.filter((task) => {
+    const identity = source === CLASSROOM_SOURCE
+      ? `${source}:external:${task.externalId ?? task.snapshot?.externalId ?? task.fingerprint}`
+      : `${source}:fingerprint:${task.fingerprint}`;
+    if (seenIdentities.has(identity)) {
+      return false;
+    }
+    seenIdentities.add(identity);
+    return true;
   });
 }
 
@@ -127,6 +159,76 @@ function isClassroomTask(task) {
   return String(task?.source ?? task?.snapshot?.source ?? ESCHOOL_SOURCE) === CLASSROOM_SOURCE;
 }
 
+function classifyNotification(previous, task) {
+  if (!previous) {
+    return 'new';
+  }
+  if (previous.notificationPending) {
+    return previous.notificationKind || 'new';
+  }
+  return snapshotsChanged(previous, task) ? 'changed' : null;
+}
+
+async function deliverPendingNotifications({
+  source,
+  database,
+  sendMessageFn,
+  logger,
+  now,
+  signal,
+} = {}) {
+  const pendingTasks = typeof database.pendingNotifications === 'function'
+    ? database.pendingNotifications(source)
+    : [];
+  let sentTasks = 0;
+  let deliveryErrors = 0;
+
+  for (const task of pendingTasks) {
+    throwIfAborted(signal);
+    const kind = task.notificationKind || 'new';
+    const message = kind === 'changed'
+      ? formatChangedHomeworkMessage(task)
+      : formatNewHomeworkMessage(task);
+    const sendOptions = {
+      replyMarkup: createCompleteKeyboard(task.id),
+      task,
+      kind,
+      signal,
+    };
+    if (isClassroomTask(task)) {
+      sendOptions.parseMode = 'HTML';
+    }
+
+    try {
+      await sendMessageFn(message, sendOptions);
+    } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
+      deliveryErrors += 1;
+      logger(
+        `[bot-sync] Telegram delivery failed for ${kind} ${source} homework: ${errorMessage(error)}`,
+      );
+      // Telegram's retry_after is a server-side pacing instruction. Do not
+      // turn one rate limit into a burst of more rejected requests.
+      if (Number.isFinite(Number(error?.retryAfter))) {
+        break;
+      }
+      continue;
+    }
+
+    try {
+      database.recordNotificationSuccess(task.id, new Date(now).toISOString());
+      sentTasks += 1;
+    } catch (error) {
+      deliveryErrors += 1;
+      logger(`[bot-sync] Could not record Telegram delivery: ${errorMessage(error)}`);
+    }
+  }
+
+  return { sentTasks, deliveryErrors };
+}
+
 export async function syncProviderHomeworks({
   source,
   fetchTasksFn,
@@ -135,6 +237,7 @@ export async function syncProviderHomeworks({
   sendMessageFn,
   logger = console.log,
   now = new Date(),
+  signal,
 } = {}) {
   if (!source || typeof fetchTasksFn !== 'function') {
     throw new SmokeTestError('syncProviderHomeworks requires a source and fetchTasks function');
@@ -147,8 +250,27 @@ export async function syncProviderHomeworks({
   }
 
   const timestamp = new Date(now).toISOString();
-  const providerResult = await fetchTasksFn();
-  const currentTasks = getTasksFromProviderResult(providerResult, source);
+  let currentTasks;
+  try {
+    throwIfAborted(signal);
+    const providerResult = await fetchTasksFn(signal);
+    currentTasks = getTasksFromProviderResult(providerResult, source);
+  } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
+    // A provider outage must not discard a queue committed by an earlier
+    // cycle. Attempt that queue, then preserve the original provider error.
+    await deliverPendingNotifications({
+      source,
+      database,
+      sendMessageFn,
+      logger,
+      now: timestamp,
+      signal,
+    });
+    throw error;
+  }
   const initialization = await initializeDatabase({
     database,
     legacyStateStore,
@@ -170,77 +292,54 @@ export async function syncProviderHomeworks({
     };
   }
 
-  if (typeof database.markSourceNotCurrent === 'function') {
-    database.markSourceNotCurrent(source, timestamp);
-  } else {
-    database.markAllNotCurrent(timestamp);
-  }
-
+  const matchedTasks = typeof database.findMatches === 'function'
+    ? database.findMatches(currentTasks)
+    : currentTasks.map((task) => ({ task, previous: database.findMatch(task) }));
+  const notificationPlan = [];
   let newTasks = 0;
   let updatedTasks = 0;
-  let sentTasks = 0;
-
-  for (const task of currentTasks) {
-    const previous = database.findMatch(task);
-    let kind = null;
-
-    if (!previous) {
-      kind = 'new';
-      newTasks += 1;
-    } else if (previous.notificationPending) {
-      kind = previous.notificationKind || 'new';
-      if (kind === 'changed') {
-        updatedTasks += 1;
-      } else {
-        newTasks += 1;
-      }
-    } else if (snapshotsChanged(previous, task)) {
-      kind = 'changed';
+  for (const { task, previous } of matchedTasks) {
+    const kind = classifyNotification(previous, task);
+    if (kind === 'changed') {
       updatedTasks += 1;
+    } else if (kind === 'new') {
+      newTasks += 1;
     }
-
-    const row = database.upsertSeenTask(task, {
-      timestamp,
-      notificationKind: kind,
-    });
-
-    if (!kind) {
-      continue;
-    }
-
-    const message = kind === 'changed'
-      ? formatChangedHomeworkMessage(task)
-      : formatNewHomeworkMessage(task);
-    const sendOptions = {
-      replyMarkup: createCompleteKeyboard(row.id),
-      task: row,
-      kind,
-    };
-    if (isClassroomTask(task)) {
-      sendOptions.parseMode = 'HTML';
-    }
-
-    try {
-      await sendMessageFn(message, sendOptions);
-    } catch (error) {
-      throw new SmokeTestError(
-        `Telegram delivery failed for ${kind} ${source} homework: ${errorMessage(error)}`,
-        { code: 'SYNC_SEND_ERROR', cause: error },
-      );
-    }
-
-    database.recordNotificationSuccess(row.id, timestamp);
-    sentTasks += 1;
+    notificationPlan.push({ task, previous, notificationKind: kind });
   }
 
-  logger(`[bot-sync] ${source} — New: ${newTasks}, changed: ${updatedTasks}, sent: ${sentTasks}`);
+  if (typeof database.applyProviderSnapshot === 'function') {
+    database.applyProviderSnapshot(notificationPlan, timestamp, { source });
+  } else {
+    // Compatibility fallback for test doubles that predate the transactional
+    // database API. The production database always takes the transaction path.
+    for (const entry of notificationPlan) {
+      database.upsertSeenTask(entry.task, {
+        timestamp,
+        notificationKind: entry.notificationKind,
+        previous: entry.previous,
+      });
+    }
+  }
+
+  const delivery = await deliverPendingNotifications({
+    source,
+    database,
+    sendMessageFn,
+    logger,
+    now: timestamp,
+    signal,
+  });
+
+  logger(`[bot-sync] ${source} — New: ${newTasks}, changed: ${updatedTasks}, sent: ${delivery.sentTasks}`);
   return {
     source,
     status: 'ok',
     baselineInitialized: false,
     newTasks,
     updatedTasks,
-    sentTasks,
+    sentTasks: delivery.sentTasks,
+    deliveryErrors: delivery.deliveryErrors,
     taskCount: currentTasks.length,
   };
 }
@@ -254,6 +353,7 @@ export async function syncBotHomeworks({
   telegram,
   logger = console.log,
   now = new Date(),
+  signal,
 } = {}) {
   if (!auth) {
     throw new SmokeTestError('syncBotHomeworks requires an auth client');
@@ -266,12 +366,16 @@ export async function syncBotHomeworks({
 
   const result = await syncProviderHomeworks({
     source: ESCHOOL_SOURCE,
-    fetchTasksFn: async () => getAppointmentsFn(auth),
+    fetchTasksFn: async (requestSignal) => {
+      await ensureEschoolAuth(auth, requestSignal);
+      return getAppointmentsFn(auth, { signal: requestSignal });
+    },
     database,
     legacyStateStore,
     sendMessageFn: sendMessage,
     logger,
     now,
+    signal,
   });
   removeExpiredCompletedTasks(database, new Date(now).toISOString(), logger);
   return result;
@@ -288,6 +392,7 @@ export async function syncAllHomeworks({
   telegram,
   logger = console.log,
   now = new Date(),
+  signal,
 } = {}) {
   if (!auth) {
     throw new SmokeTestError('syncAllHomeworks requires an e-school auth client');
@@ -306,14 +411,21 @@ export async function syncAllHomeworks({
   try {
     providers.push(await syncProviderHomeworks({
       source: ESCHOOL_SOURCE,
-      fetchTasksFn: async () => getAppointmentsFn(auth),
+      fetchTasksFn: async (requestSignal) => {
+        await ensureEschoolAuth(auth, requestSignal);
+        return getAppointmentsFn(auth, { signal: requestSignal });
+      },
       database,
       legacyStateStore,
       sendMessageFn: sendMessage,
       logger,
       now,
+      signal,
     }));
   } catch (error) {
+    if (signal?.aborted) {
+      throw error;
+    }
     logger(`[bot-sync] ${ESCHOOL_SOURCE} provider failed: ${errorMessage(error)}`);
     providers.push({
       source: ESCHOOL_SOURCE,
@@ -342,13 +454,17 @@ export async function syncAllHomeworks({
     try {
       providers.push(await syncProviderHomeworks({
         source: CLASSROOM_SOURCE,
-        fetchTasksFn: async () => classroomFetcher(),
+        fetchTasksFn: async (requestSignal) => classroomFetcher({ signal: requestSignal }),
         database,
         sendMessageFn: sendMessage,
         logger,
         now,
+        signal,
       }));
     } catch (error) {
+      if (signal?.aborted) {
+        throw error;
+      }
       logger(`[bot-sync] ${CLASSROOM_SOURCE} provider failed: ${errorMessage(error)}`);
       providers.push({
         source: CLASSROOM_SOURCE,

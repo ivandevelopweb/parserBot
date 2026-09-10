@@ -275,6 +275,64 @@ test('Classroom provider failure does not prevent E-school delivery', async () =
   }
 });
 
+test('E-school login failure does not prevent the independent Classroom provider', async () => {
+  const context = createSyncContext();
+  let loginCalls = 0;
+  let classroomCalls = 0;
+
+  try {
+    const result = await syncAllHomeworks({
+      ...syncOptions(context, [classroomHomework()], async () => {}, {
+        auth: {
+          async fullLogin() {
+            loginCalls += 1;
+            throw new Error('E-school login unavailable');
+          },
+        },
+        getAppointmentsFn: async () => {
+          throw new Error('E-school fetch should not run after login failure');
+        },
+        getClassroomHomeworksFn: async () => {
+          classroomCalls += 1;
+          return [classroomHomework()];
+        },
+      }),
+    });
+
+    assert.equal(loginCalls, 1);
+    assert.equal(classroomCalls, 1);
+    assert.equal(result.failedProviders.length, 1);
+    assert.equal(result.failedProviders[0].source, 'eschool');
+    assert.equal(result.providers.find((provider) => provider.source === 'classroom').status, 'ok');
+    assert.equal(context.database.countBySource('classroom'), 1);
+  } finally {
+    context.close();
+  }
+});
+
+test('Classroom response failure preserves its previous SQLite snapshot', async () => {
+  const context = createSyncContext();
+
+  try {
+    await syncAllHomeworks(syncOptions(context, [classroomHomework()], async () => {}));
+    const previous = context.database.currentTasks()[0];
+
+    const result = await syncAllHomeworks({
+      ...syncOptions(context, [], async () => {}, {
+        getClassroomHomeworksFn: async () => {
+          throw new Error('Classroom response shape is unknown');
+        },
+      }),
+    });
+
+    assert.equal(result.failedProviders[0].source, 'classroom');
+    assert.deepEqual(context.database.currentTasks().map((task) => task.id), [previous.id]);
+    assert.equal(context.database.currentTasks()[0].snapshot.title, previous.snapshot.title);
+  } finally {
+    context.close();
+  }
+});
+
 test('Classroom tasks with the same coursework id in different courses stay separate', async () => {
   const context = createSyncContext();
 

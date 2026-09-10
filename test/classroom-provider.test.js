@@ -10,6 +10,7 @@ import {
   isClassroomAssignmentAfterCutoff,
   normalizeClassroomWebAssignment,
 } from '../src/classroom-provider.js';
+import { createClassroomWebClient } from '../src/classroom-web.js';
 import { createEmptyState } from '../src/state.js';
 import { createHomeworkDatabase } from '../src/homework-db.js';
 import { syncAllHomeworks } from '../src/bot-sync.js';
@@ -131,7 +132,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
 test('web Classroom configuration takes precedence over the official fallback', () => {
   let officialCalls = 0;
   const client = createConfiguredClassroomClient({
-    env: { CLASSROOM_COOKIE_HEADER: 'x' },
+    env: { CLASSROOM_COOKIE_HEADER: 'x=y' },
     logger: () => {},
     officialClientFactory: () => {
       officialCalls += 1;
@@ -208,6 +209,36 @@ test('web Classroom tasks enter the same combined sync and database as E-school 
       database.currentTasks().map((task) => task.source).sort(),
       ['classroom', 'eschool'],
     );
+  } finally {
+    database.close();
+  }
+});
+
+test('combined sync logger does not expose sensitive Classroom network error text', async () => {
+  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const logs = [];
+  const marker = 'CLASSROOM_LOG_SECRET_MARKER';
+  const classroomClient = createClassroomWebClient({
+    env: { CLASSROOM_COOKIE_HEADER: 'SID=sid-value' },
+    fetchImpl: async () => {
+      throw new Error(`network failed for https://classroom.google.com/?at=${marker}`);
+    },
+  });
+
+  try {
+    const result = await syncAllHomeworks({
+      auth: {},
+      database,
+      legacyStateStore: { load: async () => createEmptyState() },
+      getAppointmentsFn: async () => ({ homeworkTasks: [] }),
+      getClassroomHomeworksFn: async () => classroomClient.getAuthenticatedPage(),
+      sendMessageFn: async () => {},
+      logger: (message) => logs.push(message),
+    });
+
+    assert.equal(result.failedProviders.length, 1);
+    assert.doesNotMatch(logs.join('\n'), new RegExp(marker));
+    assert.match(logs.join('\n'), /Classroom request failed due to a network error/);
   } finally {
     database.close();
   }

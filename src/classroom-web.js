@@ -6,7 +6,7 @@ import * as cheerio from 'cheerio';
 import makeFetchCookie from 'fetch-cookie';
 import { Cookie, CookieJar } from 'tough-cookie';
 
-import { ConfigError, SmokeTestError, errorMessage, normalizeDescription } from './utils.js';
+import { ConfigError, SmokeTestError, normalizeDescription } from './utils.js';
 
 export const CLASSROOM_ORIGIN = 'https://classroom.google.com';
 export const CLASSROOM_HOME_PATH = '/a/not-turned-in/all';
@@ -144,8 +144,8 @@ function unwrapCookieInput(input) {
   if (typeof input === 'string') {
     try {
       return JSON.parse(input);
-    } catch (error) {
-      throw new ConfigError(`Could not parse Classroom cookies JSON: ${errorMessage(error)}`);
+    } catch {
+      throw new ConfigError('Could not parse Classroom cookies JSON.');
     }
   }
   return input;
@@ -203,6 +203,12 @@ export function parseClassroomCookieHeader(header) {
     throw new ConfigError('Classroom Cookie header is empty.');
   }
 
+  // Validate before Headers.set(), whose native error may include the raw
+  // header value and therefore leak a copied browser session into logs.
+  if (/[\u0000-\u001f\u007f]/u.test(header)) {
+    throw new ConfigError('Classroom Cookie header contains invalid characters.');
+  }
+
   const parts = header.split(';');
   const records = [];
 
@@ -220,15 +226,22 @@ export function parseClassroomCookieHeader(header) {
     }
 
     const name = part.slice(0, separator).trim();
+    const value = part.slice(separator + 1).trim();
     if (!name) {
       throw new ConfigError(
         `Classroom Cookie header contains a malformed pair at position ${index + 1}; expected name=value.`,
       );
     }
 
+    if (!/^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/u.test(name)
+      || /["\\,;]/u.test(value)
+      || /\s/u.test(value)) {
+      throw new ConfigError('Classroom Cookie header contains invalid characters.');
+    }
+
     records.push({
       name,
-      value: part.slice(separator + 1).trim(),
+      value,
       domain: 'classroom.google.com',
       path: '/',
     });
@@ -289,8 +302,8 @@ function readCookieFile(filePath) {
   let content;
   try {
     content = readFileSync(filePath, 'utf8');
-  } catch (error) {
-    throw new ConfigError(`Could not read Classroom cookies file ${filePath}: ${errorMessage(error)}`);
+  } catch {
+    throw new ConfigError('Could not read Classroom cookies file.');
   }
   return parseClassroomCookies(content);
 }
@@ -313,7 +326,7 @@ export function loadClassroomCookies({
   const configuredPath = hasValue(cookiesPath) ? String(cookiesPath).trim() : null;
   if (configuredPath) {
     if (!existsSync(configuredPath)) {
-      throw new ConfigError(`Classroom cookies file was not found: ${configuredPath}`);
+      throw new ConfigError('Classroom cookies file was not found.');
     }
     return readCookieFile(configuredPath);
   }
@@ -340,7 +353,7 @@ export async function createClassroomCookieJar({
     ? parseClassroomCookies(cookies)
     : loadClassroomCookies({ env, cookieHeader, cookiesJson, cookiesPath, defaultPath });
 
-  for (const record of records) {
+  for (const [index, record] of records.entries()) {
     const cookie = new Cookie({
       key: record.name,
       value: record.value,
@@ -355,10 +368,9 @@ export async function createClassroomCookieJar({
 
     try {
       await cookieJar.setCookie(cookie, CLASSROOM_HOME_URL);
-    } catch (error) {
+    } catch {
       throw new ConfigError(
         `Could not load Classroom cookie #${index + 1}. Check the cookie export format.`,
-        { cause: error },
       );
     }
   }
@@ -1406,6 +1418,38 @@ function collectCourseWorkObjects(value, courseId, debug = false) {
   return { assignments, rawCandidates };
 }
 
+function hasRecognizedCourseWorkCollection(value, depth = 0, seen = new Set()) {
+  if (depth > 8 || value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'object') {
+    if (seen.has(value)) {
+      return false;
+    }
+    seen.add(value);
+  }
+
+  if (Array.isArray(value)) {
+    if (value[0] === 'hrq.cus' && Array.isArray(value[1]) && Array.isArray(value[2])) {
+      return true;
+    }
+    return value.some((child) => hasRecognizedCourseWorkCollection(child, depth + 1, seen));
+  }
+
+  if (typeof value === 'object') {
+    for (const [key, child] of Object.entries(value)) {
+      if (['courseWork', 'coursework', 'assignments'].includes(key)
+        && Array.isArray(child)) {
+        return true;
+      }
+      if (hasRecognizedCourseWorkCollection(child, depth + 1, seen)) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
 export function decodeCourseWorkPayload(payload, {
   courseId,
   debug = false,
@@ -1417,6 +1461,12 @@ export function decodeCourseWorkPayload(payload, {
   }
   const decoded = decodeNestedJson(payload);
   const { assignments, rawCandidates } = collectCourseWorkObjects(decoded, normalizedCourseId, debug);
+  if (assignments.length === 0 && !hasRecognizedCourseWorkCollection(decoded)) {
+    throw new ClassroomWebError(
+      'Classroom coursework response did not contain a recognized collection',
+      { code: 'CLASSROOM_RESPONSE_ERROR' },
+    );
+  }
   if (debug) {
     return {
       assignments,
@@ -1472,41 +1522,99 @@ function pageDebugArtifactPath(filePath, pageNumber) {
   return basePath.replace(/\.debug\.txt$/i, `.page-${pageNumber}.debug.txt`);
 }
 
-async function fetchWithTimeout(fetchFn, url, init, timeoutMs) {
+function createRequestDeadline(externalSignal, timeoutMs) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  let timedOut = false;
+  let externallyAborted = false;
   let abortListener;
-  if (init.signal) {
-    abortListener = () => controller.abort();
-    if (init.signal.aborted) {
-      controller.abort();
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    controller.abort();
+  }, timeoutMs);
+  timeout.unref?.();
+
+  if (externalSignal) {
+    abortListener = () => {
+      externallyAborted = true;
+      controller.abort(externalSignal.reason);
+    };
+    if (externalSignal.aborted) {
+      abortListener();
     } else {
-      init.signal.addEventListener('abort', abortListener, { once: true });
+      externalSignal.addEventListener('abort', abortListener, { once: true });
     }
   }
 
-  try {
-    return await fetchFn(url, { ...init, signal: controller.signal });
-  } catch (error) {
-    if (controller.signal.aborted) {
-      throw new ClassroomWebError(`Classroom request timed out after ${timeoutMs} ms`, {
-        code: 'CLASSROOM_TIMEOUT',
-        cause: error,
-      });
-    }
-    throw new ClassroomWebError(`Classroom request failed: ${errorMessage(error)}`, {
-      code: 'CLASSROOM_NETWORK_ERROR',
-      cause: error,
+  return {
+    signal: controller.signal,
+    didTimeout: () => timedOut,
+    wasExternallyAborted: () => externallyAborted,
+    cleanup() {
+      clearTimeout(timeout);
+      if (abortListener && externalSignal) {
+        externalSignal.removeEventListener('abort', abortListener);
+      }
+    },
+  };
+}
+
+function errorForClassroomRequest(deadline, timeoutMs) {
+  if (deadline.didTimeout()) {
+    return new ClassroomWebError(`Classroom request timed out after ${timeoutMs} ms`, {
+      code: 'CLASSROOM_TIMEOUT',
     });
+  }
+  if (deadline.wasExternallyAborted()) {
+    return new ClassroomWebError('Classroom request was cancelled.', {
+      code: 'CLASSROOM_ABORTED',
+    });
+  }
+  return new ClassroomWebError('Classroom request failed due to a network error.', {
+    code: 'CLASSROOM_NETWORK_ERROR',
+  });
+}
+
+function attachBodyDeadline(response, deadline, timeoutMs) {
+  if (!response || typeof response.text !== 'function') {
+    deadline.cleanup();
+    return response;
+  }
+
+  const originalText = response.text.bind(response);
+  response.text = async (...args) => {
+    try {
+      const text = await originalText(...args);
+      if (deadline.didTimeout() || deadline.wasExternallyAborted()) {
+        throw errorForClassroomRequest(deadline, timeoutMs);
+      }
+      return text;
+    } catch {
+      throw errorForClassroomRequest(deadline, timeoutMs);
+    } finally {
+      deadline.cleanup();
+    }
+  };
+  return response;
+}
+
+async function fetchWithTimeout(fetchFn, url, init, timeoutMs) {
+  const deadline = createRequestDeadline(init.signal, timeoutMs);
+  let responseReturned = false;
+  try {
+    const response = await fetchFn(url, { ...init, signal: deadline.signal });
+    responseReturned = true;
+    return attachBodyDeadline(response, deadline, timeoutMs);
+  } catch {
+    throw errorForClassroomRequest(deadline, timeoutMs);
   } finally {
-    clearTimeout(timeout);
-    if (abortListener && init.signal) {
-      init.signal.removeEventListener('abort', abortListener);
+    if (!responseReturned) {
+      deadline.cleanup();
     }
   }
 }
 
 function headersWithRawCookie(init, url, cookieHeader) {
+  parseClassroomCookieHeader(cookieHeader);
   const headers = new Headers(init.headers ?? {});
   const parsedUrl = parseUrl(url);
   if (parsedUrl?.hostname === 'classroom.google.com') {
@@ -1678,6 +1786,7 @@ export async function callClassroomRpc({
   debugTargets,
   expectedCourseId,
   bootstrapFromAuthenticatedPage = false,
+  signal,
 } = {}) {
   if (!client?.request) {
     throw new ConfigError('Classroom web client is required for RPC calls');
@@ -1689,7 +1798,7 @@ export async function callClassroomRpc({
     throw new ConfigError(`Classroom RPC ${rpcid} payload is required`);
   }
 
-  const session = bootstrap ?? (await client.getAuthenticatedPage()).bootstrap;
+  const session = bootstrap ?? (await client.getAuthenticatedPage({ signal })).bootstrap;
   if (!session?.at || !session?.fSid || !session?.bl) {
     throw new ClassroomBootstrapError();
   }
@@ -1788,6 +1897,7 @@ export async function callClassroomRpc({
     method: 'POST',
     headers: requestHeaders,
     body,
+    signal,
   });
 
   if (!response.ok) {
@@ -1848,6 +1958,7 @@ export async function getCourseWorkForCourse(
     debugRunId,
     debugTargets,
     includePagination = false,
+    signal,
   } = {},
 ) {
   const normalizedCourseId = String(courseId ?? '').trim();
@@ -1855,7 +1966,23 @@ export async function getCourseWorkForCourse(
     throw new ConfigError('Classroom course id is required');
   }
 
-  const page = await client.getAuthenticatedPage();
+  const refreshable = (error) => error?.code === 'CLASSROOM_SESSION_EXPIRED'
+    || error?.code === 'CLASSROOM_BOOTSTRAP_ERROR';
+  const refreshSession = async () => {
+    client.invalidateSession?.();
+    return client.getAuthenticatedPage({ force: true, signal });
+  };
+  let refreshed = false;
+  let page;
+  try {
+    page = await client.getAuthenticatedPage({ signal });
+  } catch (error) {
+    if (!refreshable(error)) {
+      throw error;
+    }
+    refreshed = true;
+    page = await refreshSession();
+  }
 
   const assignments = [];
   const seenAssignmentIds = new Set();
@@ -1875,7 +2002,7 @@ export async function getCourseWorkForCourse(
       payload[0][1] = continuationToken;
     }
 
-    const rpcResult = await callClassroomRpc({
+    const rpcOptions = {
       client,
       rpcid: CLASSROOM_RPC_ID,
       sourcePath: CLASSROOM_SOURCE_PATH,
@@ -1891,7 +2018,20 @@ export async function getCourseWorkForCourse(
       debugTargets,
       expectedCourseId: normalizedCourseId,
       bootstrapFromAuthenticatedPage: true,
-    });
+      signal,
+    };
+    let rpcResult;
+    try {
+      rpcResult = await callClassroomRpc(rpcOptions);
+    } catch (error) {
+      if (refreshed || !refreshable(error)) {
+        throw error;
+      }
+      refreshed = true;
+      page = await refreshSession();
+      rpcOptions.bootstrap = page.bootstrap;
+      rpcResult = await callClassroomRpc(rpcOptions);
+    }
     const rpcPayload = debug ? rpcResult.payload : rpcResult;
     const decoded = decodeCourseWorkPayload(rpcPayload, {
       courseId: normalizedCourseId,
@@ -1964,13 +2104,31 @@ export async function getCourseWorkForCourse(
   return includePagination ? { assignments, ...pagination } : assignments;
 }
 
-export async function getCourses(client) {
+export async function getCourses(client, { signal } = {}) {
   if (!client?.getAuthenticatedHomePage) {
     throw new ConfigError('Classroom web client is required to list courses');
   }
 
-  const page = await client.getAuthenticatedHomePage();
-  const payload = await callClassroomRpc({
+  const refreshable = (error) => error?.code === 'CLASSROOM_SESSION_EXPIRED'
+    || error?.code === 'CLASSROOM_BOOTSTRAP_ERROR';
+  const refreshSession = async () => {
+    client.invalidateSession?.();
+    return client.getAuthenticatedHomePage({ force: true, signal });
+  };
+  let refreshed = false;
+  let page;
+  try {
+    page = await client.getAuthenticatedHomePage({ signal });
+  } catch (error) {
+    if (!refreshable(error)) {
+      throw error;
+    }
+    refreshed = true;
+    page = await refreshSession();
+  }
+
+  let payload;
+  const rpcOptions = {
     client,
     rpcid: CLASSROOM_COURSES_RPC_ID,
     sourcePath: CLASSROOM_COURSES_PATH,
@@ -1978,7 +2136,19 @@ export async function getCourses(client) {
     payload: createCourseListRpcPayload(),
     bootstrap: page.bootstrap,
     bootstrapFromAuthenticatedPage: true,
-  });
+    signal,
+  };
+  try {
+    payload = await callClassroomRpc(rpcOptions);
+  } catch (error) {
+    if (refreshed || !refreshable(error)) {
+      throw error;
+    }
+    refreshed = true;
+    page = await refreshSession();
+    rpcOptions.bootstrap = page.bootstrap;
+    payload = await callClassroomRpc(rpcOptions);
+  }
 
   return decodeCourseListPayload(payload);
 }
@@ -2008,6 +2178,9 @@ export function createClassroomWebClient({
   const rawCookieHeader = hasValue(configuredCookieHeader)
     ? String(configuredCookieHeader)
     : null;
+  if (rawCookieHeader) {
+    parseClassroomCookieHeader(rawCookieHeader);
+  }
 
   const state = {
     cookieJar,
@@ -2075,6 +2248,12 @@ export function createClassroomWebClient({
         length: rawCookieHeader?.length ?? 0,
       };
     },
+    invalidateSession() {
+      state.page = null;
+      state.homePage = null;
+      state.lastDiagnostics = null;
+      state.lastRpcDiagnostics = null;
+    },
     getLastDiagnostics() {
       if (!state.lastDiagnostics) {
         return null;
@@ -2112,7 +2291,7 @@ export function createClassroomWebClient({
     setLastRpcDiagnostics(value) {
       state.lastRpcDiagnostics = value;
     },
-    async getAuthenticatedPage({ force = false } = {}) {
+    async getAuthenticatedPage({ force = false, signal } = {}) {
       if (!force && state.page) {
         return state.page;
       }
@@ -2122,6 +2301,7 @@ export function createClassroomWebClient({
       await client.initialize();
 
       const requestInit = {
+        signal,
         headers: {
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -2176,16 +2356,17 @@ export function createClassroomWebClient({
       state.page = { html, response, bootstrap, diagnostics: client.getLastDiagnostics() };
       return state.page;
     },
-    async getAuthenticatedHomePage({ force = false } = {}) {
+    async getAuthenticatedHomePage({ force = false, signal } = {}) {
       if (!force && state.homePage) {
         return state.homePage;
       }
 
       // Reuse the existing session/bootstrap initialization first. This keeps
       // the raw Cookie-header import and its jar semantics in one place.
-      await client.getAuthenticatedPage();
+      await client.getAuthenticatedPage({ signal });
 
       const response = await client.request(CLASSROOM_COURSES_URL, {
+        signal,
         headers: {
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
           'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
@@ -2205,8 +2386,8 @@ export function createClassroomWebClient({
     async getCourseWorkForCourse(courseId, options) {
       return getCourseWorkForCourse(client, courseId, options);
     },
-    async getCourses() {
-      return getCourses(client);
+    async getCourses(options = {}) {
+      return getCourses(client, options);
     },
   };
 

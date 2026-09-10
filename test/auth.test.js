@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { parseLoginForm } from '../src/auth.js';
+import { createAuthClient, parseLoginForm } from '../src/auth.js';
 
 test('parseLoginForm extracts dynamic Next.js action fields', () => {
   const html = `
@@ -33,4 +33,23 @@ test('parseLoginForm rejects a page without the expected form', () => {
     () => parseLoginForm('<form><input name="username" /></form>'),
     /expected Next\.js Server Action fields/,
   );
+});
+
+test('E-school auth keeps its default request deadline when no caller signal is supplied', async () => {
+  let requestSignal;
+  const client = createAuthClient({
+    username: 'artificial-user',
+    password: 'artificial-password',
+    fetchImpl: async (_url, { signal }) => {
+      requestSignal = signal;
+      return new Response('<html><body>No login form</body></html>', { status: 200 });
+    },
+  });
+
+  await assert.rejects(
+    client.fullLogin({ logOutput: false }),
+    (error) => error.code === 'LOGIN_FORM_ERROR',
+  );
+  assert.ok(requestSignal instanceof AbortSignal);
+  assert.equal(requestSignal.aborted, false);
 });

@@ -21,7 +21,8 @@ Read the architecture document before a large change. It describes layer boundar
 
 ## Requirements
 
-- Node.js 22.5 or newer, for built-in `node:sqlite`;
+- Node.js `24.21.0` or a later `24.x` patch below `25`, for built-in
+  `node:sqlite` without an experimental flag;
 - a working Єдина школа username and password;
 - a Telegram bot token and chat id;
 - an authenticated Google Classroom browser cookie export for the Classroom web provider and local smoke-tests;
@@ -126,7 +127,7 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older or missing-update records are ignored. Each new or changed task is sent as a separate message with an inline `Позначити виконаним` button.
+`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older or missing-update records are ignored. Each new or changed task is queued in SQLite and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in SQLite.
 
 ### Render deployment
 
@@ -135,6 +136,8 @@ Worker. It runs `npm run bot`, needs no public HTTP port, and stores SQLite on a
 1 GB Persistent Disk mounted at `/var/data`. The worker sets
 `HOMEWORK_DATABASE_PATH=/var/data/homeworks.sqlite`; local runs keep using
 `data/homeworks.sqlite` unless `HOMEWORK_DATABASE_PATH` is set.
+The Blueprint pins Node.js `24.21.0` and runs `npm test` after the clean
+production dependency install before a worker can start.
 
 After applying the Blueprint, configure these Render environment variables in
 the dashboard: `ESCHOOL_USERNAME`, `ESCHOOL_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
@@ -149,8 +152,10 @@ documentation](https://render.com/docs/disks).
 
 The worker is intentionally single-instance: Telegram long polling and SQLite
 are both process-local. Render must not scale this service horizontally. On
-SIGTERM/SIGINT the bot stops polling, waits for an active sync to finish, and
-only then closes SQLite.
+SIGTERM/SIGINT the bot stops polling, aborts the active HTTP work, waits for
+the sync promise to drain, and only then closes SQLite. The Blueprint gives the
+worker a 120-second shutdown budget; the local tests cover the abort/drain
+contract but do not constitute a live Render shutdown check.
 
 On the first run, the existing archive is not sent. It becomes the baseline. If an older `data/state.json` already exists, its baseline is imported into SQLite without sending duplicate notifications.
 
@@ -171,7 +176,10 @@ Completed tasks use `❌`, which returns a task to the pending state while
 keeping the completed list open. The menu also has `ℹ️ Довідка` with the
 command list.
 
-The bot UI state and completed tasks are stored in `data/homeworks.sqlite`. Pending tasks are not removed by age. Completed tasks are removed after 14 days from `completedAt` during a later sync.
+The bot UI state, compact snapshots, and pending notification queue are stored in
+`data/homeworks.sqlite`. Pending tasks are not removed by age. Completed tasks
+are removed after 14 days from `completedAt` during a later sync. A failed
+Telegram request leaves its queue entry pending for a later cycle.
 
 The database stores only deduplicated tasks and compact snapshots, not full API
 responses. `data/state.json` is kept as a compatible legacy E-school baseline
@@ -235,8 +243,12 @@ description. Several `homeworkId` values for one real task become one stored
 task and one notification. Classroom uses the stable course/coursework id
 instead. SQLite stores a source-specific snapshot so the next sync can detect
 changes to description, title, due date/time, topics, links, files, or the
-Classroom `updateTime`. A Telegram failure does not mark the task as sent, so
-the next iteration can try again.
+Classroom `updateTime`. A provider snapshot and its notification state are
+committed in one SQLite transaction before Telegram is called. A Telegram
+failure does not mark the task as sent, so the pending queue can be retried by
+the next iteration. This is at-least-once delivery: a process crash after
+Telegram accepts a message but before SQLite acknowledges it can still produce
+a duplicate.
 
 The old `data/state.json` is still validated and written atomically by the compatible JSON sync module. A damaged file is not silently replaced. `.env`, Google credential/token files, `data/state.json`, and `data/homeworks.sqlite*` are not committed.
 

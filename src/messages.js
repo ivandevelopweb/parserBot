@@ -1,4 +1,5 @@
 import { buildHomeworkWebUrl } from './eschool.js';
+import { MAX_TELEGRAM_MESSAGE_LENGTH } from './telegram.js';
 import { formatDateForDisplay, normalizeDescription, uniqueStable } from './utils.js';
 
 function getSnapshot(task) {
@@ -46,17 +47,19 @@ function isSafeHomeworkUrl(value) {
   }
 }
 
-function getHomeworkWebUrl(task) {
+function getHomeworkWebUrlCandidates(task) {
   const snapshot = getSnapshot(task);
-  const explicitUrl = snapshot.url
-    ?? snapshot.alternateLink
-    ?? snapshot.homeworkUrl
-    ?? task?.url
-    ?? task?.alternateLink
-    ?? task?.homeworkUrl;
-  if (explicitUrl && isSafeHomeworkUrl(explicitUrl)) {
-    return String(explicitUrl).trim();
-  }
+  const explicitUrls = [
+    snapshot.url,
+    snapshot.alternateLink,
+    snapshot.homeworkUrl,
+    task?.url,
+    task?.alternateLink,
+    task?.homeworkUrl,
+  ];
+  const safeExplicitUrls = explicitUrls
+    .filter((value) => value && isSafeHomeworkUrl(value))
+    .map((value) => String(value).trim());
 
   const ids = [
     ...(Array.isArray(task?.homeworkIds) ? task.homeworkIds : []),
@@ -64,7 +67,17 @@ function getHomeworkWebUrl(task) {
     snapshot.homeworkId,
   ];
   const homeworkId = ids.find((id) => id !== undefined && id !== null && String(id).trim() !== '');
-  return buildHomeworkWebUrl(homeworkId);
+  const fallbackUrl = buildHomeworkWebUrl(homeworkId);
+  return [...new Set([...safeExplicitUrls, fallbackUrl].filter(Boolean))];
+}
+
+function getHomeworkWebUrl(task) {
+  return getHomeworkWebUrlCandidates(task)[0] ?? null;
+}
+
+function getShortestHomeworkWebUrl(task) {
+  return getHomeworkWebUrlCandidates(task)
+    .sort((left, right) => left.length - right.length)[0] ?? null;
 }
 
 const HOMEWORK_DISPLAY_MAX_LENGTH = 50;
@@ -77,6 +90,38 @@ function truncateText(value, maxLength) {
   }
 
   return `${characters.slice(0, maxLength - 1).join('').trimEnd()}…`;
+}
+
+function truncatePlainTextToLength(value, maxLength) {
+  const characters = Array.from(String(value ?? ''));
+  let result = '';
+  let index = 0;
+  while (index < characters.length && result.length + characters[index].length <= maxLength) {
+    result += characters[index];
+    index += 1;
+  }
+  if (index < characters.length && result.length < maxLength) {
+    result += '…';
+  }
+  return result;
+}
+
+function truncateEscapedHtmlTextToLength(value, maxLength) {
+  const characters = Array.from(String(value ?? ''));
+  let result = '';
+  let index = 0;
+  while (index < characters.length) {
+    const escaped = escapeHtml(characters[index]);
+    if (result.length + escaped.length > maxLength) {
+      break;
+    }
+    result += escaped;
+    index += 1;
+  }
+  if (index < characters.length && result.length < maxLength) {
+    result += '…';
+  }
+  return result;
 }
 
 function formatLinkedHomeworkTitle(task, { truncate = false } = {}) {
@@ -108,19 +153,21 @@ function formatHomeworkListItem(task) {
   return `• ${escapeHtml(subject)} — ${linkedTitle}`;
 }
 
-function formatLesson(snapshot) {
+function formatLesson(snapshot, { escape = false } = {}) {
   const details = [];
   if (snapshot.lessonNumber !== null && snapshot.lessonNumber !== undefined && snapshot.lessonNumber !== '') {
-    details.push(`Урок ${snapshot.lessonNumber}`);
+    const lessonNumber = String(snapshot.lessonNumber).trim();
+    details.push(`Урок ${escape ? escapeHtml(lessonNumber) : lessonNumber}`);
   }
   if (snapshot.startTime) {
-    details.push(String(snapshot.startTime).trim());
+    const startTime = String(snapshot.startTime).trim();
+    details.push(escape ? escapeHtml(startTime) : startTime);
   }
 
   return details.join(', ');
 }
 
-export function formatHomeworkMessage(task, type = 'new', { title } = {}) {
+function buildHomeworkMessage(task, type = 'new', { title } = {}) {
   const snapshot = getSnapshot(task);
   const source = getSource(task);
   const resolvedTitle = title ?? (type === 'changed'
@@ -132,10 +179,11 @@ export function formatHomeworkMessage(task, type = 'new', { title } = {}) {
   const homeworkTitle = normalizeDescription(snapshot.title ?? snapshot.description);
   const topics = getTopics(task);
   const targetDate = snapshot.targetDate || snapshot.assignedDate;
+  const displayTargetDate = targetDate ? formatDateForDisplay(targetDate) : '';
   const lesson = formatLesson({
     ...snapshot,
     startTime: snapshot.targetTime || snapshot.startTime,
-  });
+  }, { escape: source === 'classroom' });
   const filesCount = Number(snapshot.filesCount);
   const displaySubject = source === 'classroom' ? escapeHtml(subject) : subject;
 
@@ -160,7 +208,9 @@ export function formatHomeworkMessage(task, type = 'new', { title } = {}) {
     )).join('\n')}`);
   }
   if (targetDate) {
-    sections.push(`📅 На: ${formatDateForDisplay(targetDate)}`);
+    sections.push(`📅 На: ${source === 'classroom'
+      ? escapeHtml(displayTargetDate)
+      : displayTargetDate}`);
   } else if (source === 'classroom') {
     sections.push('📅 Дата здачі не вказана');
   }
@@ -172,6 +222,97 @@ export function formatHomeworkMessage(task, type = 'new', { title } = {}) {
   }
 
   return sections.join('\n\n');
+}
+
+const COMPACT_NOTIFICATION_MARKER = 'ℹ️ Повідомлення скорочено; повний текст збережено.';
+
+function buildCompactHomeworkMessage(task, type = 'new', { title } = {}) {
+  const snapshot = getSnapshot(task);
+  const source = getSource(task);
+  const resolvedTitle = title ?? (type === 'changed'
+    ? '✏️ Завдання змінено'
+    : '📚 Нове завдання');
+  const sections = [resolvedTitle, COMPACT_NOTIFICATION_MARKER];
+  const subject = String(snapshot.subject ?? '').trim();
+  const description = normalizeDescription(snapshot.title ?? snapshot.description);
+  const targetDate = snapshot.targetDate || snapshot.assignedDate;
+  const displayTargetDate = targetDate ? formatDateForDisplay(targetDate) : '';
+  const lesson = formatLesson({
+    ...snapshot,
+    startTime: snapshot.targetTime || snapshot.startTime,
+  }, { escape: source === 'classroom' });
+  const filesCount = Number(snapshot.filesCount);
+
+  if (subject) {
+    sections.push(source === 'classroom'
+      ? truncateEscapedHtmlTextToLength(subject, 500)
+      : truncatePlainTextToLength(subject, 500));
+  }
+  if (description) {
+    sections.push(`📝 ${source === 'classroom'
+      ? truncateEscapedHtmlTextToLength(description, 1500)
+      : truncatePlainTextToLength(description, 1500)}`);
+  }
+
+  const topics = getTopics(task);
+  if (topics.length > 0) {
+    const topicText = topics.map((topic) => `• ${topic}`).join('\n');
+    sections.push(`📖 Теми:\n${source === 'classroom'
+      ? truncateEscapedHtmlTextToLength(topicText, 1000)
+      : truncatePlainTextToLength(topicText, 1000)}`);
+  }
+  if (targetDate) {
+    sections.push(`📅 На: ${source === 'classroom'
+      ? escapeHtml(displayTargetDate)
+      : displayTargetDate}`);
+  } else if (source === 'classroom') {
+    sections.push('📅 Дата здачі не вказана');
+  }
+  if (lesson) {
+    sections.push(`🕐 ${lesson}`);
+  }
+  if (Number.isFinite(filesCount) && filesCount > 0) {
+    sections.push(`📎 Прикріплено файлів: ${filesCount}`);
+  }
+
+  const compact = sections.join('\n\n');
+  const url = getShortestHomeworkWebUrl(task);
+  if (url) {
+    const link = source === 'classroom'
+      ? `<a href="${escapeHtml(url)}">Відкрити повне завдання</a>`
+      : `🔗 ${url}`;
+    const withLink = `${compact}\n\n${link}`;
+    if (withLink.length <= MAX_TELEGRAM_MESSAGE_LENGTH) {
+      return withLink;
+    }
+  }
+
+  if (compact.length <= MAX_TELEGRAM_MESSAGE_LENGTH) {
+    return compact;
+  }
+
+  // The field budgets above are intentionally conservative, but keep a final
+  // plain/HTML-safe fallback if a future fixed section grows unexpectedly.
+  const fallbackSubject = source === 'classroom'
+    ? truncateEscapedHtmlTextToLength(subject, 250)
+    : truncatePlainTextToLength(subject, 250);
+  const fallbackDescription = source === 'classroom'
+    ? truncateEscapedHtmlTextToLength(description, 800)
+    : truncatePlainTextToLength(description, 800);
+  return [
+    resolvedTitle,
+    COMPACT_NOTIFICATION_MARKER,
+    fallbackSubject,
+    fallbackDescription ? `📝 ${fallbackDescription}` : null,
+  ].filter(Boolean).join('\n\n');
+}
+
+export function formatHomeworkMessage(task, type = 'new', options = {}) {
+  const fullMessage = buildHomeworkMessage(task, type, options);
+  if (fullMessage.length <= MAX_TELEGRAM_MESSAGE_LENGTH) {
+    return fullMessage;
+  }
+  return buildCompactHomeworkMessage(task, type, options);
 }
 
 export function formatNewHomeworkMessage(task) {

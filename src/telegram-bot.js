@@ -68,6 +68,12 @@ function isPermanentTelegramUpdateError(error) {
   return status >= 400 && status < 500 && status !== 429;
 }
 
+function isCancellationError(error) {
+  return error?.name === 'AbortError'
+    || error?.code === 'TELEGRAM_ABORTED'
+    || error?.code === 'CLASSROOM_ABORTED';
+}
+
 export function createTelegramBot({
   auth,
   telegram,
@@ -125,8 +131,12 @@ export function createTelegramBot({
           classroom,
           logger,
           now: nowProvider(),
+          signal: pollAbortController?.signal,
         });
       } catch (error) {
+        if (stopRequested && isCancellationError(error)) {
+          return null;
+        }
         logger(`[bot] Sync failed: ${errorMessage(error)}`);
         if (throwOnError) {
           throw error;
@@ -441,6 +451,9 @@ export function createTelegramBot({
     if (running) {
       throw new Error('Telegram bot is already running');
     }
+    if (stopRequested) {
+      return;
+    }
 
     running = true;
     stopRequested = false;
@@ -448,38 +461,59 @@ export function createTelegramBot({
     pollAbortController = new AbortController();
 
     try {
-      const botUser = await telegram.getMe();
+      const signal = pollAbortController.signal;
+      const botUser = await telegram.getMe({ signal });
+      if (stopRequested) {
+        return;
+      }
       if (botUser?.username) {
         logger(`[bot] Connected as @${botUser.username}`);
       } else {
         logger('[bot] Telegram connection established');
       }
-      await telegram.deleteWebhook({ dropPendingUpdates: false });
+      await telegram.deleteWebhook({ dropPendingUpdates: false, signal });
+      if (stopRequested) {
+        return;
+      }
       if (typeof telegram.setMyCommands === 'function') {
         try {
-          await telegram.setMyCommands(TELEGRAM_BOT_COMMANDS);
+          await telegram.setMyCommands(TELEGRAM_BOT_COMMANDS, { signal });
           logger('[bot] Telegram commands registered');
         } catch (error) {
           logger(`[bot] Could not register Telegram commands: ${errorMessage(error)}`);
         }
       }
+      if (stopRequested) {
+        return;
+      }
       if (typeof telegram.setChatMenuButton === 'function') {
         try {
-          await telegram.setChatMenuButton({ menuButton: { type: 'commands' } });
+          await telegram.setChatMenuButton({ menuButton: { type: 'commands' }, signal });
           logger('[bot] Telegram Menu button enabled');
         } catch (error) {
           logger(`[bot] Could not enable the Telegram command menu: ${errorMessage(error)}`);
         }
       }
+      if (stopRequested) {
+        return;
+      }
 
       // The first parse happens immediately after auth and Bot API setup.
       await runSync({ throwOnError: true });
+      if (stopRequested) {
+        return;
+      }
       syncTimer = setInterval(() => {
         void runSync();
       }, syncIntervalMs);
 
       logger(`[bot] Homework sync interval: ${Math.round(syncIntervalMs / 60000)} minutes`);
       await pollLoop();
+    } catch (error) {
+      if (stopRequested && isCancellationError(error)) {
+        return;
+      }
+      throw error;
     } finally {
       if (syncTimer) {
         clearInterval(syncTimer);
@@ -496,6 +530,7 @@ export function createTelegramBot({
       pollAbortController = null;
       running = false;
       stopped = true;
+      stopRequested = false;
     }
   }
 

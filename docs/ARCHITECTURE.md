@@ -50,7 +50,7 @@ In `npm run bot` mode this flow starts once at process startup and then runs eve
 | Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC, decode the confirmed wire shapes, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
 | Domain normalization | `src/sync.js`, `src/utils.js` | Build source-aware fingerprints, snapshots, and normalized fields. `sync.js` also contains the original JSON sync path. |
 | Bot sync | `src/bot-sync.js` | Run each provider independently, compare the latest API snapshot with SQLite, send new or changed tasks, and remove old completed history. |
-| Storage | `src/homework-db.js` | Open SQLite, migrate the v1 table to v2, and store source-aware tasks, statuses, notifications, and the Telegram offset. |
+| Storage | `src/homework-db.js` | Open SQLite, migrate the v1 table through schema version 3, normalize parseable legacy timestamps to ISO, and store source-aware tasks, statuses, notifications, and the Telegram offset. |
 | Legacy storage | `src/state.js` | Read and atomically write compatible `data/state.json`. Bot sync uses this only when importing an old baseline. |
 | Telegram transport | `src/telegram.js` | Small Telegram Bot API client built on `fetch`, with no bot framework. |
 | Telegram UI | `src/messages.js`, `src/telegram-bot.js` | Format messages, commands, inline keyboards, callbacks, long polling, and the scheduler. |
@@ -130,7 +130,11 @@ tuple. It does not guess the meaning of other numeric positions or material
 arrays. When the decoded response contains the confirmed opaque continuation
 field at `payload[1][1][0]`, the client sends another request with that value
 and stops when the field is absent. The loop has a bounded page limit and
-rejects a repeated token. A controlled live experiment showed that the first
+rejects a repeated token. A session-expired or bootstrap failure permits one
+forced page/bootstrap refresh and one retry of the same RPC; a second such
+failure is returned without another refresh. A syntactically valid but
+unrecognized coursework payload is also an error, rather than an empty
+successful snapshot. A controlled live experiment showed that the first
 numeric request field (`100`) changes the maximum returned record count, but
 its undocumented protocol meaning is not renamed to `pageSize`. Debug callers
 do not substitute smaller values as a discovery strategy: live chains with
@@ -192,7 +196,11 @@ are labeled `Дата здачі не вказана` in the Telegram list.
 
 The token is used only while building the request URL and is never written to the log. Network errors do not expose the URL that contains the token.
 
-Regular Telegram requests have a 10-second timeout. The bot CLI raises the client timeout to 35 seconds so it covers Telegram long polling with a 25-second poll timeout and some response overhead.
+Regular Telegram requests have a 10-second deadline. The bot CLI raises the
+client timeout to 35 seconds so it covers Telegram long polling with a
+25-second poll timeout and some response overhead. The deadline remains active
+through response-body reading, composes with caller cancellation, and reports
+timeout/cancellation separately without aborting the caller's external signal.
 
 HTTP 429 is logged with `retry_after` when Telegram returns it. The request does not start an endless retry. Long polling reconnects after temporary failures with a backoff from 1 second to 30 seconds while the process is alive.
 
@@ -269,7 +277,7 @@ The main database file is `data/homeworks.sqlite`. The `data/` directory is crea
 
 `database_meta` stores small process values:
 
-- `database_version`;
+- `database_version` (current schema version 3; legacy parseable timestamps are normalized to ISO during migration);
 - `baseline_initialized_at` for E-school and `baseline_initialized_at:classroom` for Classroom;
 - `telegram_update_offset`.
 
@@ -284,6 +292,13 @@ The main database file is `data/homeworks.sqlite`. The `data/` directory is crea
 - the last successful Telegram notification timestamp;
 - `notification_pending` and `notification_kind` for retrying a failed delivery;
 - `completed_at` for history and retention.
+
+All newly written database timestamps are stored as ISO 8601 strings. Opening a
+version 1 or 2 database runs the small in-place migration to version 3: valid
+legacy date strings are converted, invalid legacy values are preserved rather
+than guessed, and conversion counts are available through migration
+diagnostics. A database declaring a newer unsupported schema version is
+rejected instead of being opened with an incomplete contract.
 
 `status` and `is_current` answer different questions:
 
@@ -310,11 +325,10 @@ One provider cycle works like this:
 1. Load current tasks from that provider.
 2. Normalize them using the provider identity rules.
 3. On the provider's first sync, store a baseline and send nothing.
-4. Mark only that provider's previous rows `is_current = 0`.
-5. Find a match by source plus fingerprint/external id, or by the safe E-school appointment-id fallback.
-6. Store the new snapshot and set `notification_pending` when a notification is needed.
-7. Send one Telegram message for each new or changed task.
-8. Only after Telegram returns success, clear `notification_pending` and write `last_notified_at`.
+4. Build the full match plan before mutating SQLite.
+5. In one SQLite transaction, mark only that provider's previous rows `is_current = 0`, upsert the new snapshot, and set `notification_pending` when a notification is needed.
+6. After commit, read the pending queue and send one Telegram message for each eligible task.
+7. Only after Telegram returns success, clear `notification_pending` and write `last_notified_at`.
 
 `syncAllHomeworks()` runs the E-school cycle and then the Classroom cycle. A
 provider fetch or delivery error is recorded in the result and logged, while
@@ -325,7 +339,11 @@ Pending tasks are not removed by age. The 14-day rule applies only to completed 
 
 ### Telegram failure
 
-The task row is inserted or updated before delivery. If Telegram returns an error, `notification_pending` remains set and sync throws. The next cycle can try the delivery again.
+The task row and notification decision are committed before delivery. If
+Telegram returns an error, `notification_pending` remains set; the current
+cycle records the delivery failure and the next cycle can try it again. A
+provider fetch failure does not overwrite its last committed snapshot, but the
+already committed queue is still given a delivery attempt.
 
 This gives the system an at-least-once delivery model, not an exactly-once model. If the process stops after Telegram accepts the message but before `last_notified_at` is written, the next cycle may send a duplicate. The Telegram API and SQLite cannot share one transaction, and this project chooses not to lose a homework notification silently.
 
@@ -333,7 +351,7 @@ This gives the system an at-least-once delivery model, not an exactly-once model
 
 ### Messages
 
-New tasks are sent as separate messages. The formatter includes only non-empty sections: subject, description, topics, target date, lesson/time, and file count.
+New tasks are sent as separate messages. The formatter includes only non-empty sections: subject, description, topics, target date, lesson/time, and file count. It escapes external text and links, enforces Telegram's 4096-character limit, and falls back to a compact field-preserving message when the full formatted task is too long; the stored snapshot is not truncated.
 
 In lists, the homework title is an HTML link to the source task. E-school uses
 `/homework/{homeworkId}` in the diary; Classroom uses an explicit `alternateLink`
@@ -376,8 +394,8 @@ Every callback checks the configured `TELEGRAM_CHAT_ID`. Updates from another ch
 | Command | Behavior |
 | --- | --- |
 | `npm start` | Smoke-test: login, force a refresh check through `/portal`, fetch the current week, and print tasks to the console. |
-| `npm run sync` | One production sync: login, fetch E-school and configured Classroom data, compare with SQLite, send new/changed tasks, and exit. |
-| `npm run bot` | Login, configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes. The process stays alive. |
+| `npm run sync` | One production sync: authenticate the E-school provider as needed, fetch E-school and configured Classroom data, compare with SQLite, deliver queued new/changed tasks, and exit. |
+| `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. |
 | `npm run classroom:auth` | Run the local Google OAuth consent flow and save `google-token.json`; do not use this on Render. |
 | `npm run classroom:smoke` | Load the local authenticated Classroom cookies, verify the web session and bootstrap, call `pONvgf` for `CLASSROOM_COURSE_ID` (default `544644036115`), inspect/save the response in debug mode, decode it, and exit. It does not touch Telegram or SQLite. |
 | `npm run classroom:courses:smoke` | Load `/h`, discover the visible courses from `gXtzob` without hardcoded course ids, fetch all available `pONvgf` pages for every course, print `course name | assignments fetched | pages fetched | newest assignment`, and exit. It does not touch Telegram or SQLite. |
@@ -402,10 +420,19 @@ secrets are entered in Render rather than committed files: the E-school
 credentials, Telegram credentials, and the authenticated
 `CLASSROOM_COOKIE_HEADER`.
 
-When shutdown is requested, the bot aborts Telegram polling and clears the
-interval, then waits for a currently running sync to finish before its caller
-closes the database. This avoids closing SQLite while a provider or delivery
-operation is still writing.
+When shutdown is requested, the bot aborts Telegram polling and the shared
+provider/delivery HTTP work, clears the interval, then waits for a currently
+running sync promise to drain before its caller closes the database. The
+Blueprint sets a 120-second Render shutdown budget. The local lifecycle tests
+verify signal propagation and database-close ordering; they are not a live
+Render shutdown check.
+
+The Render Blueprint pins Node.js `24.21.0` and uses
+`npm ci --omit=dev && npm test` as its build command. The package engine range
+is `>=24.21.0 <25`; this keeps the worker on the tested Node.js 24 LTS line,
+where `node:sqlite` is available without an experimental startup flag. The
+build test suite uses only temporary/in-memory fixtures and does not authorize
+providers or send Telegram messages.
 
 ## 9. Security and privacy
 
@@ -471,9 +498,12 @@ no horizontal scaling, and no built-in replication or backup. Only the mounted
 ### Built-in `node:sqlite` instead of an ORM
 
 No ORM package is needed, and the schema stays visible in `homework-db.js`.
-The cost is a Node.js 22.5 or newer requirement. The schema version is
-recorded, and the v1-to-v2 source-column migration is intentionally small; a
-separate migration runner is still not needed for this one-process MVP.
+The worker is pinned to the tested Node.js 24 LTS range (`24.21.0` or later
+24.x patch below 25). The schema version is recorded, and the v1-to-v3
+source/timestamp migration is intentionally small; parseable legacy timestamp
+values are converted to ISO while invalid values are preserved and counted for
+diagnostics. A separate migration runner is still not needed for this
+one-process MVP.
 
 ### Long polling instead of a webhook
 
