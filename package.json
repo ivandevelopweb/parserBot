@@ -1,0 +1,27 @@
+{
+  "name": "eschool-smoke-test",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Browserless Node.js smoke-test client for the Єдина школа service",
+  "type": "module",
+  "engines": {
+    "node": ">=22.5"
+  },
+  "scripts": {
+    "start": "node src/index.js",
+    "sync": "node --disable-warning=ExperimentalWarning src/sync-cli.js",
+    "bot": "node --disable-warning=ExperimentalWarning src/bot-cli.js",
+    "classroom:auth": "node --disable-warning=ExperimentalWarning src/classroom-auth-cli.js",
+    "classroom:smoke": "node --disable-warning=ExperimentalWarning src/classroom-smoke-cli.js",
+    "classroom:courses:smoke": "node --disable-warning=ExperimentalWarning src/classroom-courses-smoke-cli.js",
+    "telegram:test": "node src/telegram-check.js",
+    "test": "node --disable-warning=ExperimentalWarning --test"
+  },
+  "dependencies": {
+    "cheerio": "1.0.0",
+    "dotenv": "16.4.7",
+    "fetch-cookie": "3.1.0",
+    "googleapis": "^178.1.1",
+    "tough-cookie": "5.1.2"
+  }
+}

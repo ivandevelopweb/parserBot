@@ -1,0 +1,26 @@
+services:
+  - type: worker
+    name: homework-parser
+    runtime: node
+    plan: "0.5c-512mb"
+    buildCommand: npm ci --omit=dev
+    startCommand: npm run bot
+    envVars:
+      - key: NODE_VERSION
+        value: "22.5.0"
+      - key: ESCHOOL_USERNAME
+        sync: false
+      - key: ESCHOOL_PASSWORD
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: CLASSROOM_COOKIE_HEADER
+        sync: false
+      - key: HOMEWORK_DATABASE_PATH
+        value: /var/data/homeworks.sqlite
+    disk:
+      name: homework-data
+      mountPath: /var/data
+      sizeGB: 1

@@ -1,0 +1,198 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+
+import { formatHomeworkList, formatHomeworkMessage } from '../src/messages.js';
+
+test('formatHomeworkMessage builds the requested Ukrainian notification', () => {
+  const message = formatHomeworkMessage({
+    subject: 'Алгебра і початок аналізу',
+    topics: ['Числові множини', 'Множина дійсних чисел'],
+    description: 'Вивчити конспект, №11',
+    targetDate: '2026-09-11',
+    lessonNumber: 4,
+    startTime: '11:25',
+    filesCount: 2,
+  });
+
+  assert.match(message, /📚 Нове домашнє завдання/);
+  assert.match(message, /📖 Теми:\n• Числові множини\n• Множина дійсних чисел/);
+  assert.match(message, /📅 На: 11\.09\.2026/);
+  assert.match(message, /🕐 Урок 4, 11:25/);
+  assert.match(message, /📎 Прикріплено файлів: 2/);
+});
+
+test('formatHomeworkMessage omits empty sections', () => {
+  const message = formatHomeworkMessage({
+    subject: 'Математика',
+    description: '',
+    topics: [],
+    targetDate: '',
+    lessonNumber: null,
+    startTime: '',
+    filesCount: 0,
+  });
+
+  assert.equal(message, '📚 Нове домашнє завдання\n\nМатематика');
+  assert.doesNotMatch(message, /📝|📖|📅|🕐|📎/);
+});
+
+test('formatHomeworkList renders sorted homework titles as diary links without task buttons', () => {
+  const view = formatHomeworkList([
+    {
+      id: 2,
+      homeworkIds: [101172],
+      snapshot: {
+        subject: 'Хімія',
+        description: 'Прочитати § 2 <та> повторити & формули',
+        targetDate: '2026-09-10',
+      },
+    },
+    {
+      id: 1,
+      homeworkIds: [101166],
+      snapshot: {
+        subject: 'Алгебра і початок аналізу',
+        description: 'Вивчити конспект, №11',
+        targetDate: '2026-09-09',
+      },
+    },
+  ]);
+
+  assert.equal(view.parseMode, 'HTML');
+  assert.equal(view.keyboard.inline_keyboard.length, 2);
+  assert.equal(view.keyboard.inline_keyboard[0].length, 2);
+  assert.equal(
+    view.keyboard.inline_keyboard[0][0].text,
+    '✅ Алгебра і початок аналізу · 09.09 · Вивчити конспект, №11',
+  );
+  assert.equal(view.keyboard.inline_keyboard[0][0].callback_data, 'complete:list:1:0');
+  assert.ok(view.text.indexOf('09.09.2026') < view.text.indexOf('10.09.2026'));
+  assert.match(
+    view.text,
+    /<a href="https:\/\/diary\.eschool-ua\.com\/homework\/101166">Вивчити конспект, №11 \(Єдина школа\)<\/a>/,
+  );
+  assert.match(
+    view.text,
+    /Прочитати § 2 &lt;та&gt; повторити &amp; формули \(Єдина школа\)/,
+  );
+});
+
+test('formatHomeworkList limits the page to six tasks in two columns and adds navigation', () => {
+  const tasks = Array.from({ length: 7 }, (_, index) => ({
+    id: index + 1,
+    homeworkIds: [101200 + index],
+    snapshot: {
+      subject: `Предмет ${index + 1}`,
+      description: `Завдання ${index + 1}`,
+      targetDate: '2026-09-11',
+    },
+  }));
+
+  const firstPage = formatHomeworkList(tasks);
+  const firstRows = firstPage.keyboard.inline_keyboard;
+  assert.equal(firstPage.pageCount, 2);
+  assert.equal(firstRows.slice(0, 3).length, 3);
+  assert.deepEqual(firstRows.slice(0, 3).map((row) => row.length), [2, 2, 2]);
+  assert.deepEqual(firstRows[3], [
+    { text: '1/2', callback_data: 'noop' },
+    { text: '▶️', callback_data: 'current:page:1' },
+  ]);
+
+  const secondPage = formatHomeworkList(tasks, { page: 1 });
+  assert.equal(secondPage.page, 1);
+  assert.equal(secondPage.keyboard.inline_keyboard[0].length, 1);
+  assert.deepEqual(secondPage.keyboard.inline_keyboard[1], [
+    { text: '◀️', callback_data: 'current:page:0' },
+    { text: '2/2', callback_data: 'noop' },
+  ]);
+});
+
+test('formatHomeworkList renders Classroom source labels and links', () => {
+  const view = formatHomeworkList([{
+    id: 10,
+    source: 'classroom',
+    externalId: 'course-1:work-1',
+    snapshot: {
+      source: 'classroom',
+      subject: 'Алгебра',
+      title: 'Рціональні вирази №91-100',
+      description: 'Розв’язати вправи №91-100',
+      targetDate: '2026-09-11',
+      url: 'https://classroom.google.com/c/course-1/a/work-1/details',
+    },
+  }]);
+
+  assert.match(
+    view.text,
+    /<a href="https:\/\/classroom\.google\.com\/c\/course-1\/a\/work-1\/details">Рціональні вирази №91-100 \(Classroom\)<\/a>/,
+  );
+  assert.equal(
+    view.keyboard.inline_keyboard[0][0].text,
+    '✅ Алгебра · 11.09 · Розв’язати вправи №91-100',
+  );
+});
+
+test('formatHomeworkList truncates long assignment text in links and buttons', () => {
+  const longDescription = `${'А'.repeat(49)}TAIL ЗАВДАННЯ НЕ ПОКАЗУВАТИ`;
+  const expectedDescription = `${'А'.repeat(49)}…`;
+  const view = formatHomeworkList([{
+    id: 11,
+    source: 'classroom',
+    snapshot: {
+      source: 'classroom',
+      description: longDescription,
+      targetDate: '2026-09-11',
+      url: 'https://classroom.google.com/c/course-1/a/work-11/details',
+    },
+  }]);
+
+  assert.match(view.text, new RegExp(`${expectedDescription} \\(Classroom\\)`));
+  assert.doesNotMatch(view.text, /TAIL ЗАВДАННЯ НЕ ПОКАЗУВАТИ/);
+  assert.equal(view.keyboard.inline_keyboard[0][0].text, `✅ 11.09 · ${expectedDescription}`);
+  assert.doesNotMatch(view.keyboard.inline_keyboard[0][0].text, /TAIL/);
+});
+
+test('formatHomeworkList ignores unsafe explicit links and uses the diary fallback', () => {
+  const view = formatHomeworkList([{
+    id: 12,
+    homeworkIds: [101999],
+    snapshot: {
+      subject: 'Математика',
+      description: 'Небезпечне посилання',
+      targetDate: '2026-09-11',
+      url: 'javascript:alert(1)',
+    },
+  }]);
+
+  assert.doesNotMatch(view.text, /javascript:/i);
+  assert.match(view.text, /https:\/\/diary\.eschool-ua\.com\/homework\/101999/);
+});
+
+test('Classroom homework without a due date is shown last with an explicit label', () => {
+  const view = formatHomeworkList([
+    {
+      id: 1,
+      source: 'classroom',
+      snapshot: {
+        source: 'classroom',
+        subject: 'Фізика',
+        title: 'Прочитати тему',
+        description: 'Прочитати тему',
+        targetDate: null,
+      },
+    },
+  ]);
+
+  assert.match(view.text, /📅 Дата здачі не вказана · 1/);
+  assert.match(view.text, /Прочитати тему \(Classroom\)/);
+  assert.match(
+    formatHomeworkMessage({
+      source: 'classroom',
+      subject: 'Фізика',
+      title: 'Прочитати тему',
+      description: 'Прочитати тему',
+      targetDate: null,
+    }),
+    /📅 Дата здачі не вказана/
+  );
+});
