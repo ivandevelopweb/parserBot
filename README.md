@@ -115,7 +115,7 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older or missing-update records are ignored. Each new or changed task is queued in PostgreSQL and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
+`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older records are still scanned for status changes but are not newly imported as pending work. Classroom reads explicit not-turned-in and turned-in state filters, updates the stable course-qualified row, and treats only confirmed completed/returned states as completed; ambiguous states preserve the previous status. The first Classroom status reconciliation is quiet and recorded in PostgreSQL. Each new or changed task is queued in PostgreSQL and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
 
 ### Render deployment
 
@@ -179,8 +179,12 @@ failed Telegram request leaves its queue entry pending for a later cycle.
 
 The database stores only deduplicated tasks and compact snapshots, not full API
 responses. `data/state.json` is kept only as a compatible legacy E-school
-baseline importer. Classroom has its own baseline marker and never sends all
-existing coursework on its first sync.
+baseline importer. Classroom has its own baseline marker and a separate
+`classroom_status_reconciled_at` marker; it never sends all existing coursework
+on its first sync or during the first status migration. Manual Telegram
+completion/restoration has priority over an automatic Classroom status, and an
+already completed task's queued notification is discarded without being
+reported as delivered.
 
 To check the Telegram Bot API separately:
 
@@ -219,12 +223,15 @@ maximum returned record count, but the client does not assign it a documented
 protocol name. Smaller experimental values are not used because their chained
 totals varied between requests. The course smoke-test additionally loads `/h` and decodes the
 home-page `gXtzob` response; it selects the visible sidebar records dynamically
-and does not hardcode the account's course ids. The web provider now merges
-eligible normalized coursework into the PostgreSQL task table and Telegram UI.
-The first successful Classroom sync creates a provider-specific baseline
-without sending the existing tasks as new. Classroom due timestamps are
-converted to `Europe/Kyiv`; tasks without a due date sort last and are labeled
-`Дата здачі не вказана`. Its debug inspector
+and does not hardcode the account's course ids. The web provider now performs
+three bounded state scans per course: `[1,2]` for not-turned-in work, the
+confirmed turned-in set for coverage, and `[3,4,5,6,7,9,11]` for confirmed
+completed/returned work. States `8` and `10`, and any record that cannot be
+classified consistently across scans, remain unknown. The first successful
+Classroom sync creates a provider-specific baseline and status reconciliation
+without sending existing tasks as new. Classroom due timestamps are converted
+to `Europe/Kyiv`; tasks without a due date sort last and are labeled `Дата
+здачі не вказана`. Its debug inspector
 examines the raw `wrb.fr` frames before nested JSON decoding and recursively
 walks every decoded array, object, and nested JSON string, so a raw JSON
 `null` payload is distinguished from a decoder failure and validation values
@@ -237,13 +244,15 @@ A Єдина школа fingerprint contains `targetAppointmentId` and the norma
 description. Several `homeworkId` values for one real task become one stored
 task and one notification. Classroom uses the stable course/coursework id
 instead. PostgreSQL stores a source-specific snapshot so the next sync can detect
-changes to description, title, due date/time, topics, links, files, or the
-Classroom `updateTime`. A provider snapshot and its notification state are
-committed in one PostgreSQL transaction before Telegram is called. A Telegram
-failure does not mark the task as sent, so the pending queue can be retried by
-the next iteration. This is at-least-once delivery: a process crash after
-Telegram accepts a message but before PostgreSQL acknowledges it can still produce
-a duplicate.
+changes to description, title, due date/time, topics, links, and files. Classroom
+`updatedAt` alone is deliberately not a content change. A provider snapshot,
+confirmed Classroom status updates, and their notification state are committed
+in one PostgreSQL transaction before Telegram is called. A Telegram failure does
+not mark the task as sent, so the pending queue can be retried by the next
+iteration. The queue is rechecked before sending; a task that became completed
+is removed from the queue without being reported as a successful delivery. This
+is at-least-once delivery: a process crash after Telegram accepts a message but
+before PostgreSQL acknowledges it can still produce a duplicate.
 
 The old `data/state.json` is still validated and written atomically by the
 standalone compatible JSON sync module; the production bot does not use it as

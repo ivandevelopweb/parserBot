@@ -11,6 +11,8 @@ import { ConfigError, SmokeTestError, normalizeDescription } from './utils.js';
 export const CLASSROOM_ORIGIN = 'https://classroom.google.com';
 export const CLASSROOM_HOME_PATH = '/a/not-turned-in/all';
 export const CLASSROOM_HOME_URL = `${CLASSROOM_ORIGIN}${CLASSROOM_HOME_PATH}`;
+export const CLASSROOM_TURNED_IN_PATH = '/a/turned-in/all';
+export const CLASSROOM_TURNED_IN_URL = `${CLASSROOM_ORIGIN}${CLASSROOM_TURNED_IN_PATH}`;
 export const CLASSROOM_COURSES_PATH = '/h';
 export const CLASSROOM_COURSES_URL = `${CLASSROOM_ORIGIN}${CLASSROOM_COURSES_PATH}`;
 export const CLASSROOM_RPC_PATH = '/_/ClassroomUi/data/batchexecute';
@@ -28,6 +30,10 @@ export const DEFAULT_CLASSROOM_RPC_DEBUG_ARTIFACT_PATH = resolve(
 export const MAX_CLASSROOM_REDIRECTS = 10;
 const CLASSROOM_BROWSER_USER_AGENT = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/131 Safari/537.36';
 export const CLASSROOM_RPC_CONTENT_TYPE = 'application/x-www-form-urlencoded;charset=UTF-8';
+export const CLASSROOM_NOT_TURNED_IN_STATES = Object.freeze([1, 2]);
+export const CLASSROOM_TURNED_IN_STATES = Object.freeze([3, 4, 8, 10, 5, 7, 9, 6, 11]);
+export const CLASSROOM_COMPLETED_STATES = Object.freeze([3, 4, 5, 6, 7, 9, 11]);
+export const CLASSROOM_UNKNOWN_STATES = Object.freeze([8, 10]);
 
 const BOOTSTRAP_KEY_ALIASES = Object.freeze({
   at: ['at', 'SNlM0e'],
@@ -37,7 +43,8 @@ const BOOTSTRAP_KEY_ALIASES = Object.freeze({
 
 // This is the opaque request mask observed in the Classroom web client. The
 // numeric values are intentionally kept as data; this client does not assign
-// undocumented meanings to them. Only the course id is substituted at runtime.
+// undocumented meanings to them. The course id and confirmed state filter are
+// substituted at runtime.
 const COURSE_WORK_FLAGS_A = Object.freeze([
   1, 1, 1, 1, 1, null, null,
   [1, 1, 1, null, 1, 1, 1],
@@ -50,8 +57,6 @@ const COURSE_WORK_FLAGS_B = Object.freeze([
   1, 1, 1, 1, 1, 1, [1], 1, null, [1, 1], 1, 1, null, 1,
   [[1, 1, [], [null, 1]], 1, 1], null, null, null, 1,
 ]);
-
-const COURSE_WORK_SORT_FIELDS = Object.freeze([3, 4, 8, 10, 5, 7, 9, 6, 11]);
 
 // This value is part of the opaque request mask. A controlled live experiment
 // showed that it changes the maximum number of records returned by pONvgf, but
@@ -624,11 +629,48 @@ export function extractClassroomBootstrap(html) {
   throw new ClassroomBootstrapError();
 }
 
-export function createCourseWorkRpcPayload(courseId) {
+function normalizeDisplayStates(displayStates) {
+  if (!Array.isArray(displayStates) || displayStates.length === 0) {
+    throw new ConfigError('Classroom display states are required for pONvgf');
+  }
+
+  const normalized = [];
+  const seen = new Set();
+  for (const state of displayStates) {
+    const numericState = typeof state === 'number' ? state : Number(state);
+    if (!Number.isSafeInteger(numericState) || numericState < 0) {
+      throw new ConfigError('Classroom display states must be safe integers');
+    }
+    if (!seen.has(numericState)) {
+      seen.add(numericState);
+      normalized.push(numericState);
+    }
+  }
+  return normalized;
+}
+
+function sameNumberArray(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function sourcePathForDisplayStates(displayStates) {
+  return sameNumberArray(displayStates, CLASSROOM_NOT_TURNED_IN_STATES)
+    ? CLASSROOM_HOME_PATH
+    : CLASSROOM_TURNED_IN_PATH;
+}
+
+export function createCourseWorkRpcPayload(
+  courseId,
+  options = {},
+) {
   const normalizedCourseId = String(courseId ?? '').trim();
   if (!normalizedCourseId) {
     throw new ConfigError('Classroom course id is required for pONvgf');
   }
+  const displayStates = Array.isArray(options)
+    ? options
+    : options?.displayStates ?? CLASSROOM_NOT_TURNED_IN_STATES;
+  const normalizedDisplayStates = normalizeDisplayStates(displayStates);
 
   const numericCourseId = /^\d+$/.test(normalizedCourseId) && Number.isSafeInteger(Number(normalizedCourseId))
     ? Number(normalizedCourseId)
@@ -657,7 +699,7 @@ export function createCourseWorkRpcPayload(courseId) {
         [2, 5],
         [2],
         ...Array(10).fill(null),
-        [...COURSE_WORK_SORT_FIELDS],
+        normalizedDisplayStates,
       ],
     ],
   ];
@@ -1418,9 +1460,57 @@ function collectCourseWorkObjects(value, courseId, debug = false) {
   return { assignments, rawCandidates };
 }
 
+function hasRecognizedCourseWorkCollection(value, courseId, seen = new Set(), depth = 0) {
+  if (depth > 8 || value === null || value === undefined) {
+    return false;
+  }
+  if (typeof value === 'string') {
+    const parsed = parseNestedJsonString(value);
+    return parsed === null
+      ? false
+      : hasRecognizedCourseWorkCollection(parsed.value, courseId, seen, depth + 1);
+  }
+  if (typeof value !== 'object' || seen.has(value)) {
+    return false;
+  }
+  seen.add(value);
+
+  if (Array.isArray(value)) {
+    if (value[0] === 'hrq.cus' && Array.isArray(value[2])) {
+      return value[2].length === 0
+        || value[2].some((record) => normalizeCourseWorkArray(record, courseId));
+    }
+    if (value.length > 0 && value.every((record) => normalizeCourseWorkArray(record, courseId))) {
+      return true;
+    }
+    return value.some((child) => hasRecognizedCourseWorkCollection(child, courseId, seen, depth + 1));
+  }
+
+  for (const [key, child] of Object.entries(value)) {
+    const normalizedKey = key.toLowerCase();
+    if (['coursework', 'assignments', 'items'].includes(normalizedKey)
+      && Array.isArray(child)) {
+      return child.length === 0 || child.some((item) => (
+        normalizeCourseWorkObject(item, courseId, true)
+        || normalizeCourseWorkArray(item, courseId)
+      ));
+    }
+    if (normalizedKey === 'assignment'
+      && child && typeof child === 'object'
+      && normalizeCourseWorkObject(child, courseId, true)) {
+      return true;
+    }
+  }
+
+  return Object.values(value).some((child) => (
+    hasRecognizedCourseWorkCollection(child, courseId, seen, depth + 1)
+  ));
+}
+
 export function decodeCourseWorkPayload(payload, {
   courseId,
   debug = false,
+  includeMetadata = false,
   debugTargets,
 } = {}) {
   const normalizedCourseId = String(courseId ?? '').trim();
@@ -1429,9 +1519,11 @@ export function decodeCourseWorkPayload(payload, {
   }
   const decoded = decodeNestedJson(payload);
   const { assignments, rawCandidates } = collectCourseWorkObjects(decoded, normalizedCourseId, debug);
+  const recognized = hasRecognizedCourseWorkCollection(decoded, normalizedCourseId);
   if (debug) {
     return {
       assignments,
+      recognized,
       raw: decoded,
       rawCandidates,
       decodeDiagnostics: inspectDecodedClassroomPayload(decoded, {
@@ -1440,7 +1532,7 @@ export function decodeCourseWorkPayload(payload, {
       }),
     };
   }
-  return assignments;
+  return includeMetadata ? { assignments, recognized } : assignments;
 }
 
 /*
@@ -1827,9 +1919,9 @@ export async function callClassroomRpc({
     query: {
       rpcids: { browser: String(rpcid), node: String(rpcid), matches: true },
       sourcePath: {
-        browser: CLASSROOM_SOURCE_PATH,
+        browser: String(sourcePath),
         node: String(sourcePath),
-        matches: String(sourcePath) === CLASSROOM_SOURCE_PATH,
+        matches: true,
       },
       fSid: { browser: 'current authenticated bootstrap', node: 'configured', matches: Boolean(bootstrapFromAuthenticatedPage && hasValue(session.fSid)) },
       bl: { browser: 'current Classroom bootstrap', node: 'configured', matches: Boolean(bootstrapFromAuthenticatedPage && hasValue(session.bl)) },
@@ -1921,12 +2013,20 @@ export async function getCourseWorkForCourse(
     debugTargets,
     includePagination = false,
     signal,
+    displayStates = CLASSROOM_NOT_TURNED_IN_STATES,
+    sourcePath = null,
+    referer = null,
   } = {},
 ) {
   const normalizedCourseId = String(courseId ?? '').trim();
   if (!normalizedCourseId) {
     throw new ConfigError('Classroom course id is required');
   }
+  const normalizedDisplayStates = normalizeDisplayStates(displayStates);
+  const requestSourcePath = String(sourcePath || sourcePathForDisplayStates(normalizedDisplayStates));
+  const requestReferer = String(
+    referer || new URL(requestSourcePath, CLASSROOM_ORIGIN).toString(),
+  );
 
   const refreshable = (error) => error?.code === 'CLASSROOM_SESSION_EXPIRED'
     || error?.code === 'CLASSROOM_BOOTSTRAP_ERROR';
@@ -1959,7 +2059,9 @@ export async function getCourseWorkForCourse(
   let reachedEnd = false;
 
   for (let pageNumber = 1; pageNumber <= MAX_CLASSROOM_COURSEWORK_PAGES; pageNumber += 1) {
-    const payload = createCourseWorkRpcPayload(normalizedCourseId);
+    const payload = createCourseWorkRpcPayload(normalizedCourseId, {
+      displayStates: normalizedDisplayStates,
+    });
     if (continuationToken !== null) {
       payload[0][1] = continuationToken;
     }
@@ -1967,7 +2069,8 @@ export async function getCourseWorkForCourse(
     const rpcOptions = {
       client,
       rpcid: CLASSROOM_RPC_ID,
-      sourcePath: CLASSROOM_SOURCE_PATH,
+      sourcePath: requestSourcePath,
+      referer: requestReferer,
       payload,
       bootstrap: page.bootstrap,
       debug,
@@ -1998,9 +2101,15 @@ export async function getCourseWorkForCourse(
     const decoded = decodeCourseWorkPayload(rpcPayload, {
       courseId: normalizedCourseId,
       debug,
+      includeMetadata: true,
       debugTargets,
     });
-    const pageAssignments = debug ? decoded.assignments : decoded;
+    if (!decoded.recognized) {
+      throw new ClassroomWebError('Classroom coursework response schema is unknown', {
+        code: 'CLASSROOM_RESPONSE_SCHEMA_UNKNOWN',
+      });
+    }
+    const pageAssignments = decoded.assignments;
 
     for (const assignment of pageAssignments) {
       const identity = `${assignment.courseId}:${assignment.assignmentId}`;
@@ -2061,9 +2170,18 @@ export async function getCourseWorkForCourse(
       rawMatches: debugRawMatches,
       rpcDiagnostics: lastDebugPage?.rpcDiagnostics ?? null,
       pagination,
+      recognized: true,
+      complete: true,
     };
   }
-  return includePagination ? { assignments, ...pagination } : assignments;
+  return includePagination
+    ? {
+      assignments,
+      ...pagination,
+      recognized: true,
+      complete: true,
+    }
+    : assignments;
 }
 
 export async function getCourses(client, { signal } = {}) {
@@ -2174,6 +2292,7 @@ export function createClassroomWebClient({
   const client = {
     timeoutMs,
     requestIdFactory,
+    supportsStateFilters: true,
     async initialize() {
       if (!state.cookieJar) {
         state.cookieJar = rawCookieHeader

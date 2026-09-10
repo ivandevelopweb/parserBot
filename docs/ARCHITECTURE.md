@@ -46,10 +46,10 @@ In `npm run bot` mode this flow starts once at process startup and then runs eve
 | Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load `.env`, assemble dependencies, and start the selected mode. |
 | Authentication | `src/auth.js`, `src/classroom-web.js` | Perform E-school login through the dynamic Next.js Server Action; keep E-school cookies in memory; and load the already authenticated Classroom browser cookie source. |
 | Diary client | `src/eschool.js` | Bootstrap `seplogin`, fetch the current week from Appointment API, extract homework, and deduplicate it. |
-| Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC, decode the confirmed wire shapes, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
+| Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC with explicit state filters, validate the confirmed wire shapes, classify coursework status conservatively, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
 | Domain normalization | `src/sync.js`, `src/utils.js` | Build source-aware fingerprints, snapshots, and normalized fields. `sync.js` also contains the original JSON sync path. |
 | Bot sync | `src/bot-sync.js` | Run each provider independently, compare the latest API snapshot with PostgreSQL, send new or changed tasks, and remove old completed history. |
-| Storage | `src/homework-db.js`, `src/postgres-homework-db.js`, `src/homework-db-shared.js` | Require `HOMEWORK_DATABASE_URL`, initialize the PostgreSQL schema version 3, normalize timestamps to ISO, and store source-aware tasks, statuses, notifications, and the Telegram offset through an async pool contract. |
+| Storage | `src/homework-db.js`, `src/postgres-homework-db.js`, `src/homework-db-shared.js` | Require `HOMEWORK_DATABASE_URL`, initialize the PostgreSQL schema version 4, migrate v3 rows without deleting data, normalize timestamps to ISO, and store source-aware tasks, status origins, notifications, and the Telegram offset through an async pool contract. |
 | Legacy storage | `src/state.js` | Read and atomically write compatible `data/state.json`. Bot sync uses this only when importing an old baseline. |
 | Telegram transport | `src/telegram.js` | Small Telegram Bot API client built on `fetch`, with no bot framework. |
 | Telegram UI | `src/messages.js`, `src/telegram-bot.js` | Format messages, commands, inline keyboards, callbacks, long polling, and the scheduler. |
@@ -113,29 +113,26 @@ for compatible pages. `_reqid` is generated per request. The RPC helper sends
 the form-encoded `f.req` and `at`, handles XSSI and length-prefixed
 batchexecute frames, and recursively decodes nested JSON.
 
-`getCourseWorkForCourse(courseId)` currently uses only `pONvgf`. The opaque
-numeric request mask is kept in one template, and the supplied course id is
-substituted at runtime. The decoder supports both explicit coursework object
-fields and the array-only shape confirmed in the live response: the
-course-qualified identity pair, title, plain description, and optional due
-tuple. It does not guess the meaning of other numeric positions or material
-arrays. When the decoded response contains the confirmed opaque continuation
-field at `payload[1][1][0]`, the client sends another request with that value
-and stops when the field is absent. The loop has a bounded page limit and
-rejects a repeated token. A session-expired or bootstrap failure permits one
-forced page/bootstrap refresh and one retry of the same RPC; a second such
-failure is returned without another refresh. An unrecognized coursework
-payload keeps the legacy tolerant behavior and produces no assignments; the
-decoder does not guess meanings for unknown numeric fields. A controlled live
-experiment showed that the first
+`getCourseWorkForCourse(courseId)` uses only `pONvgf`. The opaque numeric
+request mask is kept in one template, the supplied course id is substituted at
+runtime, and the state filter is written to the confirmed protobuf position
+`payload[2][0][14]`. It defaults to `[1,2]` for `/a/not-turned-in/all`; callers
+can explicitly request the turned-in route and another verified state set. The
+decoder supports both explicit coursework object fields and the array-only
+shape confirmed in the live response: the course-qualified identity pair,
+title, plain description, and optional due tuple. It does not guess the meaning
+of other numeric positions or material arrays. When the decoded response
+contains the confirmed opaque continuation field at `payload[1][1][0]`, the
+client sends another request with that value and stops when the field is
+absent. The loop has a bounded page limit and rejects a repeated token. A
+session-expired or bootstrap failure permits one forced page/bootstrap refresh
+and one retry of the same RPC; a second such failure is returned without
+another refresh. A response without a recognized coursework collection is
+rejected by the provider, so an unknown schema cannot look like an empty
+successful snapshot. A controlled live experiment showed that the first
 numeric request field (`100`) changes the maximum returned record count, but
-its undocumented protocol meaning is not renamed to `pageSize`. Debug callers
-do not substitute smaller values as a discovery strategy: live chains with
-`10`, `25`, `50`, and `75` produced different incomplete totals, while `100`
-returned the full 86-record slice for the observed course. The implementation
-therefore keeps the observed `100` and follows only server-issued continuation
-values.
-inspect the raw response framing and `wrb.fr` payload field before nested JSON
+its undocumented protocol meaning is not renamed to `pageSize`.
+Debug callers inspect the raw response framing and `wrb.fr` payload field before nested JSON
 decoding, recursively report validation paths, and save only the response body
 to a timestamped ignored debug artifact. The validated client is connected to
 production sync through `src/classroom-provider.js`. That adapter applies the
@@ -167,12 +164,19 @@ from the not-turned-in response. The web client therefore treats these
 responses as provider slices, not as proof that every published coursework
 item has been fetched.
 
-Production sync uses `src/classroom-provider.js` to call these two operations,
-join each assignment with its dynamically discovered course name, and filter
-by `updatedAt >= 2026-09-01T00:00:00+03:00`. Assignments without a valid
-`updatedAt` are ignored. The adapter converts `dueAt` to a `targetDate` and
-`targetTime` in `Europe/Kyiv`; missing due dates sort after dated tasks and
-are labeled `Дата здачі не вказана` in the Telegram list.
+Production sync uses `src/classroom-provider.js` to call these operations. For
+each course it reads `[1,2]` (not turned in), the confirmed turned-in set
+`[3,4,8,10,5,7,9,6,11]` for coverage, and the safe completed/returned set
+`[3,4,5,6,7,9,11]`. States `3,4` and `5,6,7,9,11` are treated as completed;
+`8,10`, conflicting observations, and absent records are unknown and preserve
+the previous local status. This is deliberately conservative because the live
+investigation found a repeatable gap between the separate filtered result
+sets. The adapter filters only newly imported pending/content tasks by
+`updatedAt >= 2026-09-01T00:00:00+03:00`, while status refreshes still search
+for known older rows and may insert a newly seen completed row without a
+notification. It converts `dueAt` to a `targetDate` and `targetTime` in
+`Europe/Kyiv`; missing due dates sort after dated tasks and are labeled `Дата
+здачі не вказана` in the Telegram list.
 
 ### Telegram Bot API
 
@@ -257,8 +261,8 @@ filesCount
 
 E-school change notifications compare the description, target date, topics, and
 other display fields. Classroom change notifications also compare title, due
-time, link, file count, and `updateTime`. A change to an E-school technical
-`homeworkId` alone does not create a notification.
+time, link, and file count; `updatedAt` alone is not a content change. A change
+to an E-school technical `homeworkId` alone does not create a notification.
 
 When the description changes, the fingerprint changes too. `findMatch()` first looks for the new fingerprint, then may find exactly one older row with the same `targetAppointmentId`. This keeps the local task id and avoids creating an extra row. If there is more than one candidate, the code does not merge them automatically.
 
@@ -274,7 +278,9 @@ file, Render Persistent Disk, or SQLite fallback is opened by the bot or
 `src/postgres-homework-db.js` owns the schema and async repository contract.
 `src/homework-db-shared.js` contains task validation, JSON conversion, row
 mapping, and identity helpers shared by the adapter and tests. Database startup
-creates the schema if needed and records schema version 3 in `database_meta`.
+creates the schema if needed and records schema version 4 in `database_meta`.
+It migrates a v3 PostgreSQL schema in place: existing completed rows receive a
+conservative `manual` completion origin, while pending rows keep a null origin.
 An unsupported future version is rejected. There is intentionally no SQLite
 data migration: the move to PostgreSQL starts with a clean PostgreSQL schema,
 and the old local SQLite file is neither read nor deleted.
@@ -283,8 +289,9 @@ and the old local SQLite file is neither read nor deleted.
 
 `database_meta` stores small process values:
 
-- `database_version` (current PostgreSQL schema version 3);
+- `database_version` (current PostgreSQL schema version 4);
 - `baseline_initialized_at` for E-school and `baseline_initialized_at:classroom` for Classroom;
+- `classroom_status_reconciled_at`, written only after a complete, committed Classroom status pass;
 - `telegram_update_offset`.
 
 `homework_tasks` stores:
@@ -294,6 +301,7 @@ and the old local SQLite file is neither read nor deleted.
 - JSON text columns `homework_ids_json` and `snapshot_json`;
 - `is_current`, meaning whether the task appeared in the latest API snapshot;
 - `status`, either `pending` or `completed`;
+- `completion_origin`, either `manual`, `classroom`, or null for an uncompleted task;
 - first-seen and last-seen timestamps;
 - the last successful Telegram notification timestamp;
 - `notification_pending` and `notification_kind` for retrying a failed delivery;
@@ -305,15 +313,25 @@ rejected instead of being opened with an incomplete contract.
 
 `status` and `is_current` answer different questions:
 
-- `status = pending` means the user has not marked the task complete;
-- `status = completed` means the user pressed the complete button;
-- `is_current = 1` means the task appeared in the latest Appointment API response.
+- `status = pending` means the task is locally uncompleted;
+- `status = completed` means the task is locally completed;
+- `completion_origin = manual` means a Telegram decision wins over later Classroom observations;
+- `completion_origin = classroom` means the state came from a confirmed Classroom scan;
+- `is_current = 1` means the task appeared in the latest complete provider snapshot
+  where that provider uses an absence sweep; Classroom deliberately does not use
+  absence for this flag because its filtered result sets have a known completeness
+  gap.
 
 The current list selects only `is_current = 1 AND status = 'pending'`. The completed history selects every row with `status = 'completed'`, even when that task later disappears from the API.
 
-When a task disappears from the API, sync does not send a deletion notification.
-Its row stays in PostgreSQL, but a pending row with `is_current = 0` is not
-shown in the current list until the task appears again.
+When an E-school task disappears from the API, sync does not send a deletion
+notification. Its row stays in PostgreSQL, but a pending row with
+`is_current = 0` is not shown in the current list until the task appears again.
+Classroom deliberately does not sweep `is_current` from absence: the live
+state-filtered result sets have a known completeness gap, so an absent record is
+unknown rather than completed or deleted. Confirmed Classroom completion is
+represented by `status = completed`, which removes the task from the current
+list without relying on `is_current`.
 
 ### First run
 
@@ -330,13 +348,22 @@ A damaged JSON file is not silently replaced. `state.js` raises an error with th
 
 One provider cycle works like this:
 
-1. Load current tasks from that provider.
+1. Load current tasks from that provider. The Classroom adapter also returns
+   confirmed status observations and a completeness marker.
 2. Normalize them using the provider identity rules.
-3. On the provider's first sync, store a baseline and send nothing.
+3. On the provider's first sync, store a baseline and send nothing. The first
+   complete Classroom status reconciliation is also quiet and records
+   `classroom_status_reconciled_at` in the same transaction.
 4. Build the full match plan before mutating PostgreSQL.
-5. In one PostgreSQL transaction, mark only that provider's previous rows `is_current = 0`, upsert the new snapshot, and set `notification_pending` when a notification is needed.
-6. After commit, read the pending queue and send one Telegram message for each eligible task.
-7. Only after Telegram returns success, clear `notification_pending` and write `last_notified_at`.
+5. In one PostgreSQL transaction, mark only E-school's previous rows
+   `is_current = 0`, upsert the new snapshot, apply known Classroom status
+   transitions by course-qualified external id, and set `notification_pending`
+   when a notification is needed. Classroom absence never sweeps rows.
+6. After commit, recheck each pending queue row and send one Telegram message
+   for each still-pending task. A completed row's stale notification is cleared
+   without being counted as a delivery.
+7. Only after Telegram returns success, clear `notification_pending` and write
+   `last_notified_at`.
 
 The repository methods are asynchronous because every read and write goes
 through PostgreSQL. The production path supplies all match results to the
@@ -356,7 +383,9 @@ The task row and notification decision are committed before delivery. If
 Telegram returns an error, `notification_pending` remains set; the current
 cycle records the delivery failure and the next cycle can try it again. A
 provider fetch failure does not overwrite its last committed snapshot, but the
-already committed queue is still given a delivery attempt.
+already committed queue is still given a delivery attempt. Before sending, the
+queue is rechecked against PostgreSQL; if Classroom has completed that task,
+the stale queue flag is cleared without claiming Telegram delivery succeeded.
 
 This gives the system an at-least-once delivery model, not an exactly-once model. If the process stops after Telegram accepts the message but before `last_notified_at` is written, the next cycle may send a duplicate. Telegram and PostgreSQL cannot share one transaction, and this project chooses not to lose a homework notification silently.
 

@@ -1,6 +1,7 @@
 import { SmokeTestError } from './utils.js';
 
-export const DATABASE_VERSION = 3;
+export const DATABASE_VERSION = 4;
+export const CLASSROOM_STATUS_RECONCILED_META_KEY = 'classroom_status_reconciled_at';
 
 export class HomeworkDatabaseError extends SmokeTestError {
   constructor(message, options = {}) {
@@ -78,6 +79,7 @@ export function rowToTask(row) {
     lastNotifiedAt: row.last_notified_at,
     notificationPending: isDatabaseFlagSet(row.notification_pending),
     notificationKind: row.notification_kind,
+    completionOrigin: row.completion_origin ?? null,
     completedAt: row.completed_at,
     createdAt: row.created_at,
     updatedAt: row.updated_at,

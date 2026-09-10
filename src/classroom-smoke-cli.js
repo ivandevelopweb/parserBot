@@ -6,6 +6,7 @@ import {
   CLASSROOM_ORIGIN,
   CLASSROOM_RPC_CONTENT_TYPE,
   CLASSROOM_RPC_ID,
+  CLASSROOM_TURNED_IN_STATES,
   createClassroomWebClient,
 } from './classroom-web.js';
 import { errorMessage } from './utils.js';
@@ -218,6 +219,7 @@ async function main() {
       debug: true,
       debugRunId: debugRun.id,
       debugArtifactPath: debugRun.artifactPath,
+      displayStates: CLASSROOM_TURNED_IN_STATES,
       debugTargets: {
         assignmentId: VALIDATION_ASSIGNMENT_ID,
         courseId: VALIDATION_COURSE_ID,

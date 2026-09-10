@@ -7,6 +7,7 @@ import {
 import { createStateStore } from './state.js';
 import { toSyncTask } from './sync.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
+import { CLASSROOM_STATUS_RECONCILED_META_KEY } from './homework-db-shared.js';
 
 export const COMPLETED_TASK_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 export const ESCHOOL_SOURCE = 'eschool';
@@ -69,31 +70,97 @@ function getTasksFromProviderResult(result, source) {
   });
 }
 
-function snapshotsChanged(previous, current) {
+function getProviderSnapshot(result, source) {
+  const rawTasks = getTasksFromProviderResult(result, source);
+  const metadata = result;
+  const statusSyncEnabled = source === CLASSROOM_SOURCE
+    && metadata?.statusSyncEnabled === true;
+  if (!statusSyncEnabled) {
+    return {
+      currentTasks: rawTasks,
+      statusUpdates: [],
+      currentExternalIds: null,
+      snapshotComplete: true,
+      statusReconciliationComplete: false,
+      statusSyncEnabled: false,
+    };
+  }
+
+  if (!Array.isArray(metadata.statusUpdates)
+    || metadata.snapshotComplete !== true
+    || metadata.statusReconciliationComplete !== true) {
+    throw new SmokeTestError(
+      'Classroom provider returned an incomplete status snapshot',
+      { code: 'SYNC_DATA_ERROR' },
+    );
+  }
+
+  const statusUpdates = [];
+  const seenIds = new Set();
+  for (const entry of metadata.statusUpdates) {
+    const task = entry?.task ?? entry;
+    const normalizedTask = task?.snapshot && task?.fingerprint
+      ? task
+      : toSyncTask({ ...task, source });
+    const identity = String(
+      normalizedTask.externalId
+        ?? normalizedTask.snapshot?.externalId
+        ?? normalizedTask.fingerprint,
+    ).trim();
+    const status = String(entry?.status ?? normalizedTask.classroomStatus ?? '').trim().toLowerCase();
+    if (!identity || !['pending', 'completed'].includes(status)) {
+      continue;
+    }
+    if (seenIds.has(identity)) {
+      continue;
+    }
+    seenIds.add(identity);
+    statusUpdates.push({
+      task: normalizedTask,
+      status,
+      allowInsert: entry?.allowInsert !== false,
+    });
+  }
+
+  return {
+    currentTasks: rawTasks.filter((task) => (
+      task.classroomStatus === 'pending' || task.classroomStatus === 'completed'
+    )),
+    statusUpdates,
+    currentExternalIds: Array.isArray(metadata.currentExternalIds)
+      ? metadata.currentExternalIds.map((value) => String(value))
+      : [],
+    snapshotComplete: true,
+    statusReconciliationComplete: true,
+    statusSyncEnabled: true,
+  };
+}
+
+function snapshotComparable(snapshot, { includeUpdatedAt = true } = {}) {
+  const value = {
+    source: String(snapshot?.source ?? 'eschool'),
+    title: normalizeDescription(snapshot?.title ?? snapshot?.description),
+    description: normalizeDescription(snapshot?.description),
+    targetDate: String(snapshot?.targetDate ?? ''),
+    targetTime: String(snapshot?.targetTime ?? ''),
+    topics: Array.isArray(snapshot?.topics) ? snapshot.topics.map(normalizeTopic) : [],
+    url: String(snapshot?.url ?? snapshot?.alternateLink ?? snapshot?.homeworkUrl ?? ''),
+    filesCount: Number(snapshot?.filesCount ?? 0),
+  };
+  if (includeUpdatedAt) {
+    value.updatedAt = String(snapshot?.updatedAt ?? '');
+  }
+  return value;
+}
+
+function snapshotsChanged(previous, current, source = null) {
   const left = previous?.snapshot ?? {};
   const right = current?.snapshot ?? {};
+  const isClassroom = source === CLASSROOM_SOURCE
+    || String(left.source ?? right.source ?? ESCHOOL_SOURCE) === CLASSROOM_SOURCE;
 
-  return JSON.stringify({
-    source: String(left.source ?? 'eschool'),
-    title: normalizeDescription(left.title ?? left.description),
-    description: normalizeDescription(left.description),
-    targetDate: String(left.targetDate ?? ''),
-    targetTime: String(left.targetTime ?? ''),
-    topics: Array.isArray(left.topics) ? left.topics.map(normalizeTopic) : [],
-    url: String(left.url ?? left.alternateLink ?? left.homeworkUrl ?? ''),
-    updatedAt: String(left.updatedAt ?? ''),
-    filesCount: Number(left.filesCount ?? 0),
-  }) !== JSON.stringify({
-    source: String(right.source ?? 'eschool'),
-    title: normalizeDescription(right.title ?? right.description),
-    description: normalizeDescription(right.description),
-    targetDate: String(right.targetDate ?? ''),
-    targetTime: String(right.targetTime ?? ''),
-    topics: Array.isArray(right.topics) ? right.topics.map(normalizeTopic) : [],
-    url: String(right.url ?? right.alternateLink ?? right.homeworkUrl ?? ''),
-    updatedAt: String(right.updatedAt ?? ''),
-    filesCount: Number(right.filesCount ?? 0),
-  });
+  return JSON.stringify(snapshotComparable(left, { includeUpdatedAt: !isClassroom }))
+    !== JSON.stringify(snapshotComparable(right, { includeUpdatedAt: !isClassroom }));
 }
 
 function legacyEntryToTask(key, entry) {
@@ -158,14 +225,17 @@ function isClassroomTask(task) {
   return String(task?.source ?? task?.snapshot?.source ?? ESCHOOL_SOURCE) === CLASSROOM_SOURCE;
 }
 
-function classifyNotification(previous, task) {
+function classifyNotification(previous, task, source) {
   if (!previous) {
+    if (source === CLASSROOM_SOURCE && task.classroomStatus === 'completed') {
+      return null;
+    }
     return 'new';
   }
   if (previous.notificationPending) {
     return previous.notificationKind || 'new';
   }
-  return snapshotsChanged(previous, task) ? 'changed' : null;
+  return snapshotsChanged(previous, task, source) ? 'changed' : null;
 }
 
 async function deliverPendingNotifications({
@@ -184,17 +254,36 @@ async function deliverPendingNotifications({
 
   for (const task of pendingTasks) {
     throwIfAborted(signal);
-    const kind = task.notificationKind || 'new';
+    let currentTask = task;
+    if (typeof database.findById === 'function') {
+      try {
+        const latest = await database.findById(task.id);
+        if (!latest || !latest.notificationPending || latest.status === 'completed') {
+          if (latest?.status === 'completed' && latest.notificationPending
+            && typeof database.clearNotification === 'function') {
+            await database.clearNotification(latest.id, new Date(now).toISOString());
+          }
+          continue;
+        }
+        currentTask = latest;
+      } catch (error) {
+        deliveryErrors += 1;
+        logger(`[bot-sync] Could not recheck queued notification: ${errorMessage(error)}`);
+        continue;
+      }
+    }
+
+    const kind = currentTask.notificationKind || 'new';
     const message = kind === 'changed'
-      ? formatChangedHomeworkMessage(task)
-      : formatNewHomeworkMessage(task);
+      ? formatChangedHomeworkMessage(currentTask)
+      : formatNewHomeworkMessage(currentTask);
     const sendOptions = {
-      replyMarkup: createCompleteKeyboard(task.id),
-      task,
+      replyMarkup: createCompleteKeyboard(currentTask.id),
+      task: currentTask,
       kind,
       signal,
     };
-    if (isClassroomTask(task)) {
+    if (isClassroomTask(currentTask)) {
       sendOptions.parseMode = 'HTML';
     }
 
@@ -217,7 +306,7 @@ async function deliverPendingNotifications({
     }
 
     try {
-      await database.recordNotificationSuccess(task.id, new Date(now).toISOString());
+      await database.recordNotificationSuccess(currentTask.id, new Date(now).toISOString());
       sentTasks += 1;
     } catch (error) {
       deliveryErrors += 1;
@@ -250,10 +339,12 @@ export async function syncProviderHomeworks({
 
   const timestamp = new Date(now).toISOString();
   let currentTasks;
+  let providerSnapshot;
   try {
     throwIfAborted(signal);
     const providerResult = await fetchTasksFn(signal);
-    currentTasks = getTasksFromProviderResult(providerResult, source);
+    providerSnapshot = getProviderSnapshot(providerResult, source);
+    currentTasks = providerSnapshot.currentTasks;
   } catch (error) {
     if (signal?.aborted) {
       throw error;
@@ -280,6 +371,15 @@ export async function syncProviderHomeworks({
   });
 
   if (initialization.initialized && !initialization.imported) {
+    if (providerSnapshot.statusSyncEnabled) {
+      await database.applyProviderSnapshot([], timestamp, {
+        source,
+        statusUpdates: providerSnapshot.statusUpdates,
+        currentExternalIds: providerSnapshot.currentExternalIds,
+        snapshotComplete: providerSnapshot.snapshotComplete,
+        statusReconciliationComplete: true,
+      });
+    }
     return {
       source,
       status: 'ok',
@@ -288,6 +388,7 @@ export async function syncProviderHomeworks({
       updatedTasks: 0,
       sentTasks: 0,
       taskCount: currentTasks.length,
+      statusReconciled: providerSnapshot.statusSyncEnabled,
     };
   }
 
@@ -298,10 +399,16 @@ export async function syncProviderHomeworks({
       previous: await database.findMatch(task),
     })));
   const notificationPlan = [];
+  const statusReconciliationPending = providerSnapshot.statusSyncEnabled
+    && !(await database.getMeta(CLASSROOM_STATUS_RECONCILED_META_KEY));
   let newTasks = 0;
   let updatedTasks = 0;
   for (const { task, previous } of matchedTasks) {
-    const kind = classifyNotification(previous, task);
+    const normalKind = classifyNotification(previous, task, source);
+    // The first Classroom status pass is a migration of observations, not a
+    // notification event. Existing queue flags remain untouched for pending
+    // work, while a completed status update can clear a stale flag atomically.
+    const kind = statusReconciliationPending ? null : normalKind;
     if (kind === 'changed') {
       updatedTasks += 1;
     } else if (kind === 'new') {
@@ -311,7 +418,14 @@ export async function syncProviderHomeworks({
   }
 
   if (typeof database.applyProviderSnapshot === 'function') {
-    await database.applyProviderSnapshot(notificationPlan, timestamp, { source });
+    await database.applyProviderSnapshot(notificationPlan, timestamp, {
+      source,
+      statusUpdates: providerSnapshot.statusUpdates,
+      currentExternalIds: providerSnapshot.currentExternalIds,
+      snapshotComplete: providerSnapshot.snapshotComplete,
+      statusReconciliationComplete: providerSnapshot.statusSyncEnabled
+        && statusReconciliationPending,
+    });
   } else {
     // Compatibility fallback for test doubles that predate the transactional
     // database API. The production database always takes the transaction path.
@@ -343,6 +457,8 @@ export async function syncProviderHomeworks({
     sentTasks: delivery.sentTasks,
     deliveryErrors: delivery.deliveryErrors,
     taskCount: currentTasks.length,
+    statusReconciled: providerSnapshot.statusSyncEnabled
+      && Boolean(await database.getMeta(CLASSROOM_STATUS_RECONCILED_META_KEY)),
   };
 }
 

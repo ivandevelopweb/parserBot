@@ -10,7 +10,11 @@ import {
   CLASSROOM_COURSES_PATH,
   CLASSROOM_COURSES_RPC_ID,
   CLASSROOM_COURSES_URL,
+  CLASSROOM_HOME_PATH,
   CLASSROOM_HOME_URL,
+  CLASSROOM_TURNED_IN_PATH,
+  CLASSROOM_TURNED_IN_URL,
+  CLASSROOM_NOT_TURNED_IN_STATES,
   MAX_CLASSROOM_COURSEWORK_PAGES,
   CLASSROOM_RPC_ID,
   callClassroomRpc,
@@ -40,6 +44,8 @@ const BOOTSTRAP = {
 };
 
 const KNOWN_COURSE_WORK_PAYLOAD = JSON.parse(String.raw`[[100,null,1,0],[[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]],[1,1,1,1,1,1,[1],1,null,[1,1],1,1,null,1,[[1,1,[],[null,1]],1,1],null,null,null,1],[null,1],null,[1,1]],[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]]],[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]],[1,1,1,1,1,1,[1],1,null,[1,1],1,1,null,1,[[1,1,[],[null,1]],1,1],null,null,null,1],[1]],null,null,[[1,1,1,1,1,null,null,[1,1,1,null,1,1,1],1,1,1,1,1,1,null,null,null,null,1,null,null,null,1,[1],1,[null,null,1,1,1,null,1]]]],[[null,[[544644036115]],[2,5],[2],null,null,null,null,null,null,null,null,null,null,[3,4,8,10,5,7,9,6,11]]]]`);
+// Keep the wire-shape fixture intact while reflecting the new default request filter.
+KNOWN_COURSE_WORK_PAYLOAD[2][0][14] = [1, 2];
 
 function bootstrapHtml() {
   return `<!doctype html><html><head><title>Classroom</title></head><body>
@@ -364,6 +370,12 @@ test('pONvgf payload substitutes the requested course id and keeps the opaque ma
   assert.deepEqual(first, KNOWN_COURSE_WORK_PAYLOAD);
   assert.deepEqual(first[0], second[0]);
   assert.notDeepEqual(first, second);
+});
+
+test('pONvgf payload accepts an explicit Classroom state filter', () => {
+  const payload = createCourseWorkRpcPayload('course-1', { displayStates: [3, 4] });
+  assert.deepEqual(payload[2][0][14], [3, 4]);
+  assert.deepEqual(CLASSROOM_NOT_TURNED_IN_STATES, [1, 2]);
 });
 
 test('batchexecute decoder handles XSSI, length framing, and nested JSON', () => {
@@ -927,6 +939,53 @@ test('coursework fetch follows continuation pages, deduplicates, and keeps the a
 
   const defaultResult = await getCourseWorkForCourse(client, 'course-1');
   assert.deepEqual(defaultResult.map(({ assignmentId }) => assignmentId), ['work-1', 'work-2']);
+});
+
+test('coursework fetch uses the turned-in route for explicit completed states', async () => {
+  const calls = [];
+  const client = {
+    requestIdFactory: () => '4321',
+    async getAuthenticatedPage() {
+      return { bootstrap: BOOTSTRAP };
+    },
+    async request(url, init) {
+      calls.push({ url, init });
+      return new Response(
+        batchexecuteResponse(CLASSROOM_RPC_ID, courseWorkPage([], 'done')),
+        { status: 200 },
+      );
+    },
+  };
+
+  await getCourseWorkForCourse(client, 'course-1', {
+    displayStates: [3, 4],
+  });
+
+  const requestUrl = new URL(calls[0].url);
+  assert.equal(requestUrl.searchParams.get('source-path'), CLASSROOM_TURNED_IN_PATH);
+  assert.equal(calls[0].init.headers.Referer, CLASSROOM_TURNED_IN_URL);
+  const fReq = JSON.parse(calls[0].init.body.get('f.req'));
+  assert.deepEqual(JSON.parse(fReq[0][0][1])[2][0][14], [3, 4]);
+});
+
+test('coursework fetch rejects an unknown response schema before returning an empty snapshot', async () => {
+  const client = {
+    requestIdFactory: () => '4321',
+    async getAuthenticatedPage() {
+      return { bootstrap: BOOTSTRAP };
+    },
+    async request() {
+      return new Response(
+        batchexecuteResponse(CLASSROOM_RPC_ID, { unrelated: [] }),
+        { status: 200 },
+      );
+    },
+  };
+
+  await assert.rejects(
+    getCourseWorkForCourse(client, 'course-1'),
+    (error) => error.code === 'CLASSROOM_RESPONSE_SCHEMA_UNKNOWN',
+  );
 });
 
 test('coursework pagination stops on a repeated continuation value', async () => {
