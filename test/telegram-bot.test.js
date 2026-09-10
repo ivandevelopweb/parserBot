@@ -268,6 +268,10 @@ test('Telegram menu stores a validated Classroom account order and reflects it i
     });
     const initialMenu = context.telegram.calls.at(-1);
     assert.equal(
+      initialMenu.args[0],
+      '📚 HomeworkParser\n\nОберіть розділ або скористайтеся командами нижче:',
+    );
+    assert.equal(
       initialMenu.args[1].replyMarkup.inline_keyboard[2][0].text,
       '🔗 Акаунт Classroom: не задано',
     );

@@ -17,7 +17,7 @@ export const HOMEWORK_SYNC_INTERVAL_MS = 10 * 60 * 1000;
 export const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_POLL_BACKOFF_MS = 30 * 1000;
 
-const MENU_TEXT = '📚 Єдина школа\n\nОберіть розділ або скористайтеся командами нижче:';
+const MENU_TEXT = '📚 HomeworkParser\n\nОберіть розділ або скористайтеся командами нижче:';
 
 export const HELP_TEXT = `ℹ️ Довідка
 
