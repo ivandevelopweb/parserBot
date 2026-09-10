@@ -40,7 +40,7 @@ test('PostgreSQL adapter initializes schema and preserves task lifecycle', async
 
   try {
     await database.saveBaseline([first], timestamp, { source: 'eschool' });
-    assert.equal(await database.getMeta('database_version'), '4');
+    assert.equal(await database.getMeta('database_version'), '5');
     assert.equal((await database.currentTasks()).length, 1);
     assert.equal((await database.findByFingerprint(first.fingerprint)).snapshot.description, 'Вивчити конспект');
 
@@ -141,6 +141,122 @@ test('PostgreSQL adapter rejects an unsupported future schema version', async ()
   );
 });
 
+test('PostgreSQL v4 migration preserves data and retention keys survive reopening every insert path', async () => {
+  const { memory, pool } = createPool();
+  const config = { connectionString: 'postgresql://test/test' };
+  const original = await createPostgresHomeworkDatabase({ ...config, pool });
+  const completed = task({ source: 'classroom', externalId: 'course-a:expired' });
+  const pending = task({ source: 'classroom', externalId: 'course-a:pending' });
+  const eschool = task();
+  const timestamp = '2026-09-01T12:00:00.000Z';
+  let savedRows;
+  try {
+    await original.saveBaseline([completed], timestamp, { source: 'classroom' });
+    await original.saveBaseline([eschool], timestamp, { source: 'eschool' });
+    const completedRow = await original.findMatch(completed);
+    await original.completeTask(completedRow.id, timestamp);
+    await original.completeTask((await original.findMatch(eschool)).id, timestamp);
+    await original.upsertSeenTask(pending, { timestamp, notificationKind: 'new' });
+    await original.setMeta('telegram_update_offset', '123');
+    savedRows = (await pool.query('SELECT * FROM homework_tasks ORDER BY id')).rows;
+    // A v4 fixture has the same task schema and no retention table.
+    // pg-mem leaves index names behind when dropping their table.
+    await pool.query('DROP INDEX classroom_task_tombstones_pkey');
+    await pool.query('DROP TABLE classroom_task_tombstones');
+    await original.setMeta('database_version', '4');
+  } finally {
+    await original.close();
+  }
+
+  const { Pool } = memory.adapters.createPg();
+  const migratedPool = new Pool();
+  const migrated = await createPostgresHomeworkDatabase({ ...config, pool: migratedPool });
+  try {
+    assert.equal(await migrated.getMeta('database_version'), '5');
+    assert.equal(migrated.getMigrationDiagnostics().fromVersion, 4);
+    assert.deepEqual((await migratedPool.query('SELECT * FROM homework_tasks ORDER BY id')).rows, savedRows);
+    assert.equal(await migrated.getMeta('telegram_update_offset'), '123');
+    assert.equal(await migrated.getMeta('baseline_initialized_at:classroom'), timestamp);
+    assert.equal(await migrated.deleteCompletedBefore('2026-09-16T12:00:00.000Z'), 2);
+    assert.equal(await migrated.deleteCompletedBefore('2026-09-16T12:00:00.000Z'), 0);
+    assert.deepEqual((await migratedPool.query('SELECT * FROM classroom_task_tombstones')).rows, [
+      { external_id: completed.externalId },
+    ], 'only the course-qualified id is retained; no text, snapshot, or E-school data');
+    assert.equal((await migrated.pendingNotifications()).length, 1);
+  } finally {
+    await migrated.close();
+  }
+
+  const reopened = await createPostgresHomeworkDatabase({ ...config, pool: new Pool() });
+  try {
+    const later = '2026-09-17T12:00:00.000Z';
+    const completedTask = { ...completed, classroomStatus: 'completed' };
+    assert.equal(await reopened.upsertSeenTask(completedTask, { timestamp: later }), null);
+    await reopened.saveBaseline([completedTask], later, { source: 'classroom' });
+    await reopened.applyProviderSnapshot([
+      { task: completedTask, previous: null, notificationKind: null },
+    ], later, {
+      source: 'classroom',
+      statusUpdates: [{ task: completedTask, status: 'completed' }],
+      statusReconciliationComplete: true,
+    });
+    assert.equal(await reopened.findMatch(completedTask), null);
+    assert.equal((await reopened.completedTasks()).length, 0);
+    assert.equal(await reopened.count(), 1);
+    assert.equal((await reopened.pendingNotifications())[0].externalId, pending.externalId);
+  } finally {
+    await reopened.close();
+  }
+});
+
+test('PostgreSQL retention rolls back when saving a deleted Classroom id fails', async () => {
+  const { pool } = createPool();
+  const statements = [];
+  let failRetention = false;
+  const wrappedPool = {
+    query: (...args) => pool.query(...args),
+    end: () => pool.end(),
+    async connect() {
+      const client = await pool.connect();
+      return {
+        release: () => client.release(),
+        async query(sql, values) {
+          if (failRetention) {
+            statements.push(sql.trim());
+            if (/INSERT INTO classroom_task_tombstones/u.test(sql)) {
+              throw new Error('simulated retention write failure');
+            }
+          }
+          return client.query(sql, values);
+        },
+      };
+    },
+  };
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test', pool: wrappedPool,
+  });
+  try {
+    const timestamp = '2026-09-01T12:00:00.000Z';
+    const completed = task({ source: 'classroom', externalId: 'course-a:expired' });
+    await database.saveBaseline([completed], timestamp);
+    await database.completeTask((await database.findMatch(completed)).id, timestamp);
+    failRetention = true;
+    await assert.rejects(
+      () => database.deleteCompletedBefore('2026-09-16T12:00:00.000Z'),
+      /PostgreSQL transaction failed: simulated retention write failure/,
+    );
+    // pg-mem does not implement rollback. Verify the application's transaction
+    // boundary explicitly; real PostgreSQL rolls the deletion back on this path.
+    assert.equal(statements[0], 'BEGIN');
+    assert.match(statements[1], /^DELETE FROM homework_tasks/u);
+    assert.match(statements[2], /^INSERT INTO classroom_task_tombstones/u);
+    assert.equal(statements[3], 'ROLLBACK');
+    assert.equal(statements.length, 4);
+  } finally {
+    await database.close();
+  }
+});
+
 test('PostgreSQL v3 migration preserves rows, marks old completed rows manual, and supports reopen', async () => {
   const memory = newDb();
   const { Pool } = memory.adapters.createPg();
@@ -203,10 +319,10 @@ test('PostgreSQL v3 migration preserves rows, marks old completed rows manual, a
     pool,
   });
   try {
-    assert.equal(await database.getMeta('database_version'), '4');
+    assert.equal(await database.getMeta('database_version'), '5');
     assert.deepEqual(database.getMigrationDiagnostics(), {
       fromVersion: 3,
-      toVersion: 4,
+      toVersion: 5,
       convertedValues: 1,
       invalidValues: 0,
     });

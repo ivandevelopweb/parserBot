@@ -49,7 +49,7 @@ In `npm run bot` mode this flow starts once at process startup and then runs eve
 | Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC with explicit state filters, validate the confirmed wire shapes, classify coursework status conservatively, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
 | Domain normalization | `src/sync.js`, `src/utils.js` | Build source-aware fingerprints, snapshots, and normalized fields. `sync.js` also contains the original JSON sync path. |
 | Bot sync | `src/bot-sync.js` | Run each provider independently, compare the latest API snapshot with PostgreSQL, send new or changed tasks, and remove old completed history. |
-| Storage | `src/homework-db.js`, `src/postgres-homework-db.js`, `src/homework-db-shared.js` | Require `HOMEWORK_DATABASE_URL`, initialize the PostgreSQL schema version 4, migrate v3 rows without deleting data, normalize timestamps to ISO, and store source-aware tasks, status origins, notifications, and the Telegram offset through an async pool contract. |
+| Storage | `src/homework-db.js`, `src/postgres-homework-db.js`, `src/homework-db-shared.js` | Require `HOMEWORK_DATABASE_URL`, initialize PostgreSQL schema version 5, migrate v3/v4 without deleting data, normalize timestamps to ISO, and store source-aware tasks, retention identities, status origins, notifications, and the Telegram offset through an async pool contract. |
 | Legacy storage | `src/state.js` | Read and atomically write compatible `data/state.json`. Bot sync uses this only when importing an old baseline. |
 | Telegram transport | `src/telegram.js` | Small Telegram Bot API client built on `fetch`, with no bot framework. |
 | Telegram UI | `src/messages.js`, `src/telegram-bot.js` | Format messages, commands, inline keyboards, callbacks, Classroom account-order input, long polling, and the scheduler. |
@@ -300,9 +300,12 @@ file, Render Persistent Disk, or SQLite fallback is opened by the bot or
 `src/postgres-homework-db.js` owns the schema and async repository contract.
 `src/homework-db-shared.js` contains task validation, JSON conversion, row
 mapping, and identity helpers shared by the adapter and tests. Database startup
-creates the schema if needed and records schema version 4 in `database_meta`.
-It migrates a v3 PostgreSQL schema in place: existing completed rows receive a
-conservative `manual` completion origin, while pending rows keep a null origin.
+creates the schema if needed and records schema version 5 in `database_meta`.
+The v4-to-v5 migration creates `classroom_task_tombstones` and advances the
+version in one transaction, preserving all task rows, metadata, and queued
+notifications. For v3, the same transaction first applies the existing v3-to-v4
+migration: completed rows receive a conservative `manual` completion origin,
+while pending rows keep a null origin. Reopening v5 performs no migration.
 An unsupported future version is rejected. There is intentionally no SQLite
 data migration: the move to PostgreSQL starts with a clean PostgreSQL schema,
 and the old local SQLite file is neither read nor deleted.
@@ -311,7 +314,7 @@ and the old local SQLite file is neither read nor deleted.
 
 `database_meta` stores small process values:
 
-- `database_version` (current PostgreSQL schema version 4);
+- `database_version` (current PostgreSQL schema version 5);
 - `baseline_initialized_at` for E-school and `baseline_initialized_at:classroom` for Classroom;
 - `classroom_status_reconciled_at`, written only after a complete, committed Classroom status pass;
 - `classroom_authuser_index`, the optional Google account order for rendered Classroom links;
@@ -399,6 +402,33 @@ the other provider still runs. Completed-task cleanup runs once after both
 cycles.
 
 Pending tasks are not removed by age. The 14-day rule applies only to completed tasks and uses `completed_at`, not the lesson date or publication date.
+
+Classroom retention deletes the full task row and saves its course-qualified
+`external_id` in `classroom_task_tombstones` in one PostgreSQL transaction.
+This table has only that primary-key column: no description, snapshot, dates,
+or notification data remain. A failed marker write rolls back the deletion.
+Every Classroom insert path checks this table, including baseline imports and
+status-only observations of pre-cutoff work. Completed, unknown, or absent
+observations do not clear a marker, so later scans and process restarts cannot
+recreate the expired completed history. E-school cleanup is unchanged.
+
+A complete Classroom snapshot with an explicit pending status clears the marker
+inside the snapshot transaction before applying its task/notification plan.
+This is previously known work, so status-only observations can restore it even
+when `updatedAt` predates the new-import cutoff; these old restorations are
+quiet. Eligible tasks in the content plan use normal notification delivery.
+Manual overrides protect rows while they exist, but retention keeps only their
+identity; a confirmed pending observation may therefore restore an expired
+manually completed task too. Unknown or conflicting statuses cannot reopen it.
+
+Markers have no retention deadline: expiring them would allow completed work to
+return again. This trades a growing set of small identifiers for deletion of
+the full homework content. Migration does not infer markers for tasks already
+deleted by older versions; if those tasks reappear, their next normal expiry
+records the identifier. Tests cover fresh schemas, v3/v4 migration, reopening,
+the strict 14-day boundary, repeated scans, and pending restorations. The
+failure test verifies BEGIN/ROLLBACK ordering because pg-mem does not implement
+transaction rollback; it is not a live PostgreSQL fault-injection test.
 
 ### Telegram failure
 
@@ -601,7 +631,7 @@ A single chat keeps access rules simple for the local MVP. The cost is that one 
 Before a large change, decide how to handle these items:
 
 - move school id, student id, and API range into configuration;
-- add explicit PostgreSQL migrations when schema version 3 needs to change;
+- add explicit PostgreSQL migrations for future schema changes;
 - split the scheduler and Telegram worker if several processes are needed;
 - add database backup and restore;
 - decide whether access should be per user or per chat;

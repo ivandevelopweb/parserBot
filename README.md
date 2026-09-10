@@ -188,6 +188,21 @@ offset, and pending notification queue are stored in PostgreSQL. Pending tasks a
 tasks are removed after 14 days from `completedAt` during a later sync. A
 failed Telegram request leaves its queue entry pending for a later cycle.
 
+For expired Classroom tasks, cleanup keeps only the course-qualified external
+id in `classroom_task_tombstones`, in the same transaction that deletes the
+task and its text/snapshot. Later completed or unknown observations cannot
+reimport that id, including after a restart. A confirmed pending observation
+clears the marker and allows the task to return, even if it predates the import
+cutoff; old status-only restorations are quiet. These small markers have no
+age-based expiry. Manual completion/restoration overrides remain in force while
+the full task row exists; after cleanup only its identity is retained.
+
+PostgreSQL schema version 5 adds this table automatically at startup, preserving
+existing v4 tasks, metadata, and notification queues. Version 3 first receives
+the existing completion-origin migration. No manual database cleanup is needed.
+Tasks deleted before this migration have no retained id and cannot be recognized
+retroactively; if reimported, their next expiry will save the marker.
+
 The database stores only deduplicated tasks and compact snapshots, not full API
 responses. `data/state.json` is kept only as a compatible legacy E-school
 baseline importer. Classroom has its own baseline marker and a separate

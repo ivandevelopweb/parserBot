@@ -2,7 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createEmptyState } from '../src/state.js';
-import { syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
+import { syncAllHomeworks, syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
 import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createPostgresHomeworkDatabase } from '../src/postgres-homework-db.js';
 import { toSyncTask } from '../src/sync.js';
@@ -610,6 +610,64 @@ test('bot sync removes only completed tasks older than fourteen days', async () 
 
     assert.equal(await context.database.findByFingerprint(oldCompleted.fingerprint), null);
     assert.ok(await context.database.findByFingerprint(pending.fingerprint));
+  } finally {
+    await context.close();
+  }
+});
+
+test('Classroom retention survives repeated scans and restores only explicitly pending coursework', async () => {
+  const context = await createTestContext();
+  const messages = [];
+  const recent = classroomHomework();
+  const old = classroomHomework({ courseId: 'course-2', updatedAt: '2026-08-01T00:00:00.000Z' });
+  const pending = classroomHomework({ courseWorkId: 'still-pending' });
+  const entries = [
+    { task: recent, status: 'completed' },
+    { task: old, status: 'completed', includeTask: false },
+    { task: pending, status: 'pending' },
+  ];
+  const cycle = (now, observations = entries) => syncAllHomeworks({
+    ...options(context, [], async (...args) => messages.push(args)),
+    getClassroomHomeworksFn: async () => classroomResult(observations),
+    now: new Date(now),
+  });
+
+  try {
+    await cycle('2026-09-09T12:00:00.000Z');
+    await cycle('2026-09-23T12:00:00.000Z');
+    assert.equal((await context.database.completedTasks()).length, 2, 'exactly 14 days is retained');
+    await cycle('2026-09-23T12:00:00.001Z');
+    assert.equal((await context.database.completedTasks()).length, 0);
+    await cycle('2026-09-23T12:10:00.000Z');
+    assert.equal((await context.database.completedTasks()).length, 0, 'the next scan must not reinsert expired work');
+    await cycle('2026-10-09T12:00:00.000Z');
+    assert.equal((await context.database.completedTasks()).length, 0, 'expired work must stay deleted');
+    assert.equal(await context.database.countBySource('classroom'), 1);
+    assert.equal(messages.length, 0);
+
+    // An absent or unknown status is not evidence that the work was reopened.
+    await cycle('2026-10-09T12:10:00.000Z', []);
+    await cycle('2026-10-09T12:20:00.000Z', [{ task: recent, status: 'unknown' }]);
+    await cycle('2026-10-09T12:30:00.000Z');
+    assert.equal(await context.database.findByExternalId(recent.externalId, 'classroom'), null);
+
+    // Known old coursework can be reopened even when it is outside the import cutoff.
+    await cycle('2026-10-09T12:40:00.000Z', [
+      { task: old, status: 'pending', includeTask: false, allowInsert: false },
+    ]);
+    assert.equal((await context.database.findByExternalId(old.externalId, 'classroom')).status, 'pending');
+    assert.equal(await context.database.findByExternalId(recent.externalId, 'classroom'), null);
+    assert.equal(messages.length, 0);
+
+    await cycle('2026-10-09T12:50:00.000Z', [{ task: recent, status: 'pending' }]);
+    assert.equal((await context.database.findByExternalId(recent.externalId, 'classroom')).status, 'pending');
+    assert.equal(messages.length, 1);
+    await cycle('2026-10-09T13:00:00.000Z', [{ task: recent, status: 'pending' }]);
+    assert.equal(messages.length, 1);
+    await cycle('2026-10-09T13:10:00.000Z', [{ task: recent, status: 'completed' }]);
+    await cycle('2026-10-24T13:10:00.000Z', [{ task: recent, status: 'completed' }]);
+    await cycle('2026-10-24T13:20:00.000Z', [{ task: recent, status: 'completed' }]);
+    assert.equal(await context.database.findByExternalId(recent.externalId, 'classroom'), null);
   } finally {
     await context.close();
   }

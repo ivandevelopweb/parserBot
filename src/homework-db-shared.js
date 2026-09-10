@@ -1,6 +1,6 @@
 import { SmokeTestError } from './utils.js';
 
-export const DATABASE_VERSION = 4;
+export const DATABASE_VERSION = 5;
 export const CLASSROOM_STATUS_RECONCILED_META_KEY = 'classroom_status_reconciled_at';
 
 export class HomeworkDatabaseError extends SmokeTestError {

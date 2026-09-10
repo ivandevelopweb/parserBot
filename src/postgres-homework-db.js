@@ -18,6 +18,12 @@ import { errorMessage } from './utils.js';
 
 const { Pool } = pg;
 
+const CLASSROOM_TOMBSTONE_SCHEMA = `
+  CREATE TABLE classroom_task_tombstones (
+    external_id TEXT PRIMARY KEY
+  )
+`;
+
 const POSTGRES_SCHEMA = `
   CREATE TABLE IF NOT EXISTS database_meta (
     key TEXT PRIMARY KEY,
@@ -126,7 +132,7 @@ async function migrateV3ToV4(executor) {
     SET completion_origin = 'manual'
     WHERE status = 'completed'
   `);
-  await setMetaWithExecutor(executor, 'database_version', DATABASE_VERSION);
+  await setMetaWithExecutor(executor, 'database_version', 4);
   return Number(converted.rowCount ?? 0);
 }
 
@@ -204,6 +210,17 @@ async function insertSeenTaskWithExecutor(executor, task, {
   completionOrigin = null,
   completedAt = null,
 } = {}) {
+  if (sourceId(task) === 'classroom') {
+    const retired = await executor.query(
+      'SELECT external_id FROM classroom_task_tombstones WHERE external_id = $1',
+      [externalId(task)],
+    );
+    // Every insert path (including baselines and status-only observations)
+    // must respect retention. Only a confirmed pending status clears this key.
+    if (retired.rows.length > 0) {
+      return null;
+    }
+  }
   const pending = notificationKind ? 1 : 0;
   const result = await executor.query(`
     INSERT INTO homework_tasks (
@@ -340,17 +357,18 @@ export async function createPostgresHomeworkDatabase({
         `PostgreSQL database version ${storedVersion} is newer than supported version ${DATABASE_VERSION}`,
       );
     }
-    if (storedVersion === 3) {
-      migrationDiagnostics.convertedValues = await withTransaction(
-        (client) => migrateV3ToV4(client),
-      );
+    if (storedVersion === 0 || storedVersion === 3 || storedVersion === 4) {
+      await withTransaction(async (client) => {
+        if (storedVersion === 3) {
+          migrationDiagnostics.convertedValues = await migrateV3ToV4(client);
+        }
+        await client.query(CLASSROOM_TOMBSTONE_SCHEMA);
+        await setMetaWithExecutor(client, 'database_version', DATABASE_VERSION);
+      });
     } else if (storedVersion > 0 && storedVersion < DATABASE_VERSION) {
       throw new HomeworkDatabaseError(
         `PostgreSQL database version ${storedVersion} requires an explicit migration to ${DATABASE_VERSION}`,
       );
-    }
-    if (storedVersion === 0) {
-      await setMetaWithExecutor(databasePool, 'database_version', DATABASE_VERSION);
     }
   } catch (error) {
     if (ownsPool) {
@@ -773,6 +791,20 @@ export async function createPostgresHomeworkDatabase({
             [now, taskSource],
           );
         }
+        for (const update of normalizedStatusUpdates) {
+          if (update.status !== 'pending' || snapshotComplete === false) {
+            continue;
+          }
+          const restored = await client.query(
+            'DELETE FROM classroom_task_tombstones WHERE external_id = $1 RETURNING external_id',
+            [externalId(update.task)],
+          );
+          // This id was known before retention, so an old reopened task is
+          // eligible even when its updatedAt is outside the new-import cutoff.
+          if (restored.rows.length > 0) {
+            update.allowInsert = true;
+          }
+        }
         const rows = [];
         for (const entry of resolvedPlan) {
           const existing = entry.previous;
@@ -786,7 +818,9 @@ export async function createPostgresHomeworkDatabase({
               timestamp: now,
               notificationKind: entry.notificationKind ?? null,
             });
-          rows.push(row);
+          if (row) {
+            rows.push(row);
+          }
         }
 
         for (const update of normalizedStatusUpdates) {
@@ -923,13 +957,25 @@ export async function createPostgresHomeworkDatabase({
   async function deleteCompletedBefore(cutoffTimestamp) {
     const cutoff = normalizeTimestampForStorage(cutoffTimestamp, 'cleanup cutoff');
     try {
-      const result = await query(`
-        DELETE FROM homework_tasks
-        WHERE status = 'completed'
-          AND completed_at IS NOT NULL
-          AND completed_at < $1
-      `, [cutoff]);
-      return Number(result.rowCount ?? 0);
+      return await withTransaction(async (client) => {
+        const result = await client.query(`
+          DELETE FROM homework_tasks
+          WHERE status = 'completed'
+            AND completed_at IS NOT NULL
+            AND completed_at < $1
+          RETURNING source, external_id
+        `, [cutoff]);
+        for (const row of result.rows) {
+          if (row.source !== 'classroom' || !row.external_id) {
+            continue;
+          }
+          await client.query(`
+            INSERT INTO classroom_task_tombstones (external_id) VALUES ($1)
+            ON CONFLICT (external_id) DO NOTHING
+          `, [row.external_id]);
+        }
+        return Number(result.rowCount ?? 0);
+      });
     } catch (error) {
       throw wrapDatabaseError('Could not delete expired PostgreSQL homework', error);
     }
