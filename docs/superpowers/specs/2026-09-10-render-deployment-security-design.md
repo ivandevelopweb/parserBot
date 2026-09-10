@@ -1,5 +1,11 @@
 # Render Deployment and Security Hardening Design
 
+> Superseded for deployment/storage by the later user-approved Neon
+> PostgreSQL + free Render Web Service decision. This document is retained as
+> the historical security-remediation design for the original SQLite worker
+> option. The current implementation is documented in
+> `docs/ARCHITECTURE.md` and `docs/remediation-results.md`.
+
 ## Status
 
 Approved for implementation on 2026-09-10.

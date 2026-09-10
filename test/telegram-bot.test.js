@@ -1,8 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createHomeworkDatabase } from '../src/homework-db.js';
 import { createTelegramBot } from '../src/telegram-bot.js';
+import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 function createTelegramMock() {
   const calls = [];
@@ -23,9 +23,9 @@ function createTelegramMock() {
   };
 }
 
-function createBotContext() {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
-  database.saveBaseline([{
+async function createBotContext() {
+  const { database } = await createTestDatabase();
+  await database.saveBaseline([{
     fingerprint: 'homework-one',
     targetAppointmentId: 185141,
     homeworkIds: [101171],
@@ -53,7 +53,7 @@ function createBotContext() {
 }
 
 test('Telegram menu lists current tasks and completion moves one to history', async () => {
-  const context = createBotContext();
+  const context = await createBotContext();
 
   try {
     await context.bot.handleUpdate({
@@ -82,22 +82,22 @@ test('Telegram menu lists current tasks and completion moves one to history', as
       },
     });
 
-    assert.equal(context.database.currentTasks().length, 0);
-    assert.equal(context.database.completedTasks().length, 1);
+    assert.equal((await context.database.currentTasks()).length, 0);
+    assert.equal((await context.database.completedTasks()).length, 1);
     assert.equal(
-      context.database.completedTasks()[0].completedAt,
+      (await context.database.completedTasks())[0].completedAt,
       '2026-09-09T12:00:00.000Z',
     );
     const refreshedCall = context.telegram.calls.at(-1);
     assert.match(refreshedCall.args[0], /Наразі немає невиконаних завдань/);
     assert.equal(refreshedCall.args[1].replyMarkup.inline_keyboard[0][0].callback_data, 'menu:main');
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
 test('Telegram completion callback stores a UTC date that cleanup can expire', async () => {
-  const context = createBotContext();
+  const context = await createBotContext();
 
   try {
     await context.bot.handleUpdate({
@@ -109,21 +109,21 @@ test('Telegram completion callback stores a UTC date that cleanup can expire', a
     });
 
     assert.equal(
-      context.database.completedTasks()[0].completedAt,
+      (await context.database.completedTasks())[0].completedAt,
       '2026-09-09T12:00:00.000Z',
     );
     assert.equal(
-      context.database.deleteCompletedBefore(new Date('2026-09-23T12:00:00.000Z')),
+      await context.database.deleteCompletedBefore(new Date('2026-09-23T12:00:00.000Z')),
       1,
     );
-    assert.equal(context.database.completedTasks().length, 0);
+    assert.equal((await context.database.completedTasks()).length, 0);
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
 test('Telegram bot keeps the current list page when marking a task completed', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const tasks = Array.from({ length: 8 }, (_, index) => ({
     fingerprint: `homework-${index + 1}`,
     targetAppointmentId: 185141 + index,
@@ -134,7 +134,7 @@ test('Telegram bot keeps the current list page when marking a task completed', a
       targetDate: '2026-09-11',
     },
   }));
-  database.saveBaseline(tasks, '2026-09-09T12:00:00.000Z');
+  await database.saveBaseline(tasks, '2026-09-09T12:00:00.000Z');
   const telegram = createTelegramMock();
   const bot = createTelegramBot({
     auth: {},
@@ -168,16 +168,16 @@ test('Telegram bot keeps the current list page when marking a task completed', a
       { text: '◀️', callback_data: 'current:page:0' },
       { text: '2/2', callback_data: 'noop' },
     ]);
-    assert.equal(database.currentTasks().length, 7);
-    assert.equal(database.completedTasks().length, 1);
+    assert.equal((await database.currentTasks()).length, 7);
+    assert.equal((await database.completedTasks()).length, 1);
   } finally {
-    database.close();
+    await database.close();
   }
 });
 
 test('completed list uses a cross to restore a task and refreshes the same list', async () => {
-  const context = createBotContext();
-  context.database.completeTask(1, '2026-09-09T12:00:00.000Z');
+  const context = await createBotContext();
+  await context.database.completeTask(1, '2026-09-09T12:00:00.000Z');
 
   try {
     await context.bot.handleUpdate({
@@ -203,19 +203,19 @@ test('completed list uses a cross to restore a task and refreshes the same list'
       },
     });
 
-    assert.equal(context.database.completedTasks().length, 0);
-    assert.equal(context.database.currentTasks().length, 1);
+    assert.equal((await context.database.completedTasks()).length, 0);
+    assert.equal((await context.database.currentTasks()).length, 1);
     const refreshedCall = context.telegram.calls.at(-1);
     assert.match(refreshedCall.args[0], /Виконані домашні завдання/);
     assert.match(refreshedCall.args[0], /Поки що немає виконаних завдань/);
     assert.doesNotMatch(refreshedCall.args[0], /Виконане завдання/);
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
 test('Telegram bot ignores updates from a different chat', async () => {
-  const context = createBotContext();
+  const context = await createBotContext();
 
   try {
     await context.bot.handleUpdate({
@@ -223,12 +223,12 @@ test('Telegram bot ignores updates from a different chat', async () => {
     });
     assert.equal(context.telegram.calls.length, 0);
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
-test('Telegram bot exposes a help command and help menu button', async () => {
-  const context = createBotContext();
+test('Telegram help shows both providers and a button back to the menu', async () => {
+  const context = await createBotContext();
 
   try {
     await context.bot.handleUpdate({
@@ -238,14 +238,28 @@ test('Telegram bot exposes a help command and help menu button', async () => {
     assert.equal(helpCall.method, 'send');
     assert.match(helpCall.args[0], /\/current/);
     assert.match(helpCall.args[0], /\/completed/);
-    assert.equal(helpCall.args[1].replyMarkup.inline_keyboard.at(-1)[0].callback_data, 'menu:help');
+    assert.match(helpCall.args[0], /Єдиній школі або Google Classroom/);
+    assert.doesNotMatch(helpCall.args[0], /У картці завдання/);
+    assert.equal(helpCall.args[1].replyMarkup.inline_keyboard[0][0].text, '↩️ До меню');
+    assert.equal(helpCall.args[1].replyMarkup.inline_keyboard[0][0].callback_data, 'menu:main');
+
+    await context.bot.handleUpdate({
+      callback_query: {
+        id: 'callback-help',
+        data: 'menu:help',
+        message: { message_id: 50, chat: { id: 123 } },
+      },
+    });
+    const helpEditCall = context.telegram.calls.at(-1);
+    assert.equal(helpEditCall.method, 'edit');
+    assert.equal(helpEditCall.args[1].replyMarkup.inline_keyboard[0][0].callback_data, 'menu:main');
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
 test('expired callback queries do not fail update processing', async () => {
-  const context = createBotContext();
+  const context = await createBotContext();
   context.telegram.answerCallbackQuery = async () => {
     const error = new Error('Telegram answerCallbackQuery failed: query is too old');
     error.status = 400;
@@ -262,12 +276,12 @@ test('expired callback queries do not fail update processing', async () => {
     });
     assert.equal(context.telegram.calls.some((call) => call.method === 'edit'), true);
   } finally {
-    context.database.close();
+    await context.database.close();
   }
 });
 
 test('bot startup registers commands and enables the Telegram Menu button', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const calls = [];
   let bot;
   const telegram = {
@@ -310,12 +324,12 @@ test('bot startup registers commands and enables the Telegram Menu button', asyn
     assert.deepEqual(menuCall.options.menuButton, { type: 'commands' });
     assert.ok(menuCall.options.signal instanceof AbortSignal);
   } finally {
-    database.close();
+    await database.close();
   }
 });
 
 test('stop requested during startup prevents later setup and initial sync', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const calls = [];
   let releaseGetMe;
   let getMeStarted;
@@ -366,12 +380,12 @@ test('stop requested during startup prevents later setup and initial sync', asyn
   } finally {
     releaseGetMe();
     bot.stop();
-    database.close();
+    await database.close();
   }
 });
 
 test('startup request cancellation is treated as a graceful stop', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   let getMeStarted;
   const started = new Promise((resolve) => {
     getMeStarted = resolve;
@@ -410,12 +424,12 @@ test('startup request cancellation is treated as a graceful stop', async () => {
     assert.equal(bot.isRunning(), false);
   } finally {
     bot.stop();
-    database.close();
+    await database.close();
   }
 });
 
 test('stop during startup setup prevents later menu and sync actions', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const calls = [];
   let bot;
   const telegram = {
@@ -453,12 +467,12 @@ test('stop during startup setup prevents later menu and sync actions', async () 
     assert.equal(bot.isRunning(), false);
   } finally {
     bot.stop();
-    database.close();
+    await database.close();
   }
 });
 
 test('bot stop aborts the active sync before closing its lifecycle', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   let bot;
   let syncStarted;
   const syncStartedGate = new Promise((resolve) => {
@@ -506,12 +520,12 @@ test('bot stop aborts the active sync before closing its lifecycle', async () =>
   } finally {
     releaseSync?.();
     bot.stop();
-    database.close();
+    await database.close();
   }
 });
 
 test('bot waits for an active background sync before start resolves', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   let bot;
   let syncCalls = 0;
   let resolveSecondSyncStarted;
@@ -575,6 +589,6 @@ test('bot waits for an active background sync before start resolves', async () =
   } finally {
     releaseSecondSync();
     bot.stop();
-    database.close();
+    await database.close();
   }
 });

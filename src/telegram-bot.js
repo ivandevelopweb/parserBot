@@ -22,10 +22,9 @@ export const HELP_TEXT = `ℹ️ Довідка
 /completed — показати виконані завдання
 /help — показати цю довідку
 
-У списку назва кожного завдання є посиланням на нього в Єдиній школі.
+У списку назва кожного завдання є посиланням на нього в Єдиній школі або Google Classroom.
 Кнопка ✅ під списком позначає відповідне завдання виконаним.
-У списку виконаних завдань кнопка ❌ повертає завдання до поточних.
-У картці завдання натисніть «✅ Позначити виконаним», коли завершите його.`;
+У списку виконаних завдань кнопка ❌ повертає завдання до поточних.`;
 
 function sleep(milliseconds, signal) {
   return new Promise((resolveSleep) => {
@@ -163,7 +162,7 @@ export function createTelegramBot({
   }
 
   async function showList({ completed = false, page = 0, messageId = null } = {}) {
-    const tasks = completed ? database.completedTasks() : database.currentTasks();
+    const tasks = completed ? await database.completedTasks() : await database.currentTasks();
     const view = formatHomeworkList(tasks, { completed, page });
     const options = {};
 
@@ -205,7 +204,7 @@ export function createTelegramBot({
       await showList({ completed: true });
     } else if (command === '/help') {
       await telegram.sendTelegramMessage(HELP_TEXT, {
-        replyMarkup: MAIN_MENU_KEYBOARD,
+        replyMarkup: createBackToMenuKeyboard(),
       });
     }
   }
@@ -264,7 +263,7 @@ export function createTelegramBot({
         await answerCallback(callbackQuery);
         await telegram.editTelegramMessage(HELP_TEXT, {
           messageId,
-          replyMarkup: MAIN_MENU_KEYBOARD,
+          replyMarkup: createBackToMenuKeyboard(),
         });
         return;
       }
@@ -296,7 +295,7 @@ export function createTelegramBot({
 
       const complete = /^complete:(\d+)$/.exec(data);
       if (complete) {
-        const completed = database.completeTask(parseInteger(complete[1]), nowProvider());
+        const completed = await database.completeTask(parseInteger(complete[1]), nowProvider());
         if (!completed) {
           await answerCallback(callbackQuery, {
             text: 'Завдання вже недоступне.',
@@ -322,7 +321,7 @@ export function createTelegramBot({
 
       const listUncomplete = /^uncomplete:list:(\d+):(\d+)$/.exec(data);
       if (listUncomplete) {
-        const restored = database.uncompleteTask(
+        const restored = await database.uncompleteTask(
           parseInteger(listUncomplete[1]),
           nowProvider(),
         );
@@ -348,7 +347,7 @@ export function createTelegramBot({
       // be reached from stale Telegram messages.
       const legacyCompleted = /^completed:(\d+)$/.exec(data);
       if (legacyCompleted) {
-        const restored = database.uncompleteTask(
+        const restored = await database.uncompleteTask(
           parseInteger(legacyCompleted[1]),
           nowProvider(),
         );
@@ -366,7 +365,7 @@ export function createTelegramBot({
 
       const listComplete = /^complete:list:(\d+):(\d+)$/.exec(data);
       if (listComplete) {
-        const completed = database.completeTask(parseInteger(listComplete[1]), nowProvider());
+        const completed = await database.completeTask(parseInteger(listComplete[1]), nowProvider());
         if (!completed) {
           await answerCallback(callbackQuery, {
             text: 'Завдання вже недоступне.',
@@ -401,7 +400,7 @@ export function createTelegramBot({
   }
 
   async function pollLoop() {
-    let offset = parseInteger(database.getMeta('telegram_update_offset'));
+    let offset = parseInteger(await database.getMeta('telegram_update_offset'));
     let backoffMs = 1000;
 
     while (!stopped) {
@@ -428,7 +427,7 @@ export function createTelegramBot({
           }
           if (Number.isInteger(update?.update_id)) {
             offset = update.update_id + 1;
-            database.setMeta('telegram_update_offset', offset);
+            await database.setMeta('telegram_update_offset', offset);
           }
         }
       } catch (error) {

@@ -9,7 +9,7 @@ import {
 } from '../src/classroom.js';
 import { syncAllHomeworks } from '../src/bot-sync.js';
 import { createEmptyState } from '../src/state.js';
-import { createHomeworkDatabase } from '../src/homework-db.js';
+import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 const FIXED_NOW = new Date('2026-09-09T12:00:00.000Z');
 
@@ -30,14 +30,14 @@ function classroomHomework(overrides = {}) {
   };
 }
 
-function createSyncContext() {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+async function createSyncContext() {
+  const { database } = await createTestDatabase();
   return {
     database,
     legacyStateStore: {
       load: async () => createEmptyState(),
     },
-    close: () => database.close(),
+    close: async () => database.close(),
   };
 }
 
@@ -135,7 +135,7 @@ test('Classroom API helpers request active courses, published coursework, and fo
 });
 
 test('first combined sync creates Classroom baseline without mass notifications', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
   const messages = [];
 
   try {
@@ -148,15 +148,15 @@ test('first combined sync creates Classroom baseline without mass notifications'
     assert.equal(result.baselineInitialized, true);
     assert.equal(result.sentTasks, 0);
     assert.equal(messages.length, 0);
-    assert.equal(context.database.currentTasks().length, 1);
-    assert.equal(context.database.currentTasks()[0].source, 'classroom');
+    assert.equal((await context.database.currentTasks()).length, 1);
+    assert.equal((await context.database.currentTasks())[0].source, 'classroom');
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Classroom new task is sent once and repeated sync does not duplicate it', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
   const messages = [];
 
   try {
@@ -185,14 +185,14 @@ test('Classroom new task is sent once and repeated sync does not duplicate it', 
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /Classroom/);
     assert.equal(messages[0][1].parseMode, 'HTML');
-    assert.equal(context.database.countBySource('classroom'), 2);
+    assert.equal(await context.database.countBySource('classroom'), 2);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Classroom updateTime or content change sends an update for the same database row', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
   const messages = [];
 
   try {
@@ -210,15 +210,15 @@ test('Classroom updateTime or content change sends an update for the same databa
     assert.equal(result.updatedTasks, 1);
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /Завдання змінено/);
-    assert.equal(context.database.countBySource('classroom'), 1);
-    assert.equal(context.database.currentTasks()[0].externalId, 'course-1:work-1');
+    assert.equal(await context.database.countBySource('classroom'), 1);
+    assert.equal((await context.database.currentTasks())[0].externalId, 'course-1:work-1');
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Classroom Telegram failure leaves the task pending for retry', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
 
   try {
     await syncAllHomeworks(syncOptions(context, [classroomHomework()], async () => {}));
@@ -230,17 +230,17 @@ test('Classroom Telegram failure leaves the task pending for retry', async () =>
       },
     ));
 
-    const pending = context.database.findByExternalId('course-1:work-2', 'classroom');
+    const pending = await context.database.findByExternalId('course-1:work-2', 'classroom');
     assert.ok(pending);
     assert.equal(pending.notificationPending, true);
     assert.equal(pending.lastNotifiedAt, null);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Classroom provider failure does not prevent E-school delivery', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
   const messages = [];
   const eSchoolTask = {
     targetAppointmentId: 185141,
@@ -269,14 +269,14 @@ test('Classroom provider failure does not prevent E-school delivery', async () =
     assert.equal(result.failedProviders[0].source, 'classroom');
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /Нове завдання/);
-    assert.equal(context.database.findByFingerprint('["185142","Вправа 1"]')?.source, 'eschool');
+    assert.equal((await context.database.findByFingerprint('["185142","Вправа 1"]'))?.source, 'eschool');
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('E-school login failure does not prevent the independent Classroom provider', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
   let loginCalls = 0;
   let classroomCalls = 0;
 
@@ -304,18 +304,18 @@ test('E-school login failure does not prevent the independent Classroom provider
     assert.equal(result.failedProviders.length, 1);
     assert.equal(result.failedProviders[0].source, 'eschool');
     assert.equal(result.providers.find((provider) => provider.source === 'classroom').status, 'ok');
-    assert.equal(context.database.countBySource('classroom'), 1);
+    assert.equal(await context.database.countBySource('classroom'), 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
-test('Classroom response failure preserves its previous SQLite snapshot', async () => {
-  const context = createSyncContext();
+test('Classroom response failure preserves its previous PostgreSQL snapshot', async () => {
+  const context = await createSyncContext();
 
   try {
     await syncAllHomeworks(syncOptions(context, [classroomHomework()], async () => {}));
-    const previous = context.database.currentTasks()[0];
+    const previous = (await context.database.currentTasks())[0];
 
     const result = await syncAllHomeworks({
       ...syncOptions(context, [], async () => {}, {
@@ -326,15 +326,15 @@ test('Classroom response failure preserves its previous SQLite snapshot', async 
     });
 
     assert.equal(result.failedProviders[0].source, 'classroom');
-    assert.deepEqual(context.database.currentTasks().map((task) => task.id), [previous.id]);
-    assert.equal(context.database.currentTasks()[0].snapshot.title, previous.snapshot.title);
+    assert.deepEqual((await context.database.currentTasks()).map((task) => task.id), [previous.id]);
+    assert.equal((await context.database.currentTasks())[0].snapshot.title, previous.snapshot.title);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Classroom tasks with the same coursework id in different courses stay separate', async () => {
-  const context = createSyncContext();
+  const context = await createSyncContext();
 
   try {
     await syncAllHomeworks(syncOptions(context, [
@@ -342,10 +342,10 @@ test('Classroom tasks with the same coursework id in different courses stay sepa
       classroomHomework({ courseId: 'course-b', courseWorkId: 'same-id' }),
     ], async () => {}));
 
-    assert.equal(context.database.countBySource('classroom'), 2);
-    assert.ok(context.database.findByExternalId('course-a:same-id', 'classroom'));
-    assert.ok(context.database.findByExternalId('course-b:same-id', 'classroom'));
+    assert.equal(await context.database.countBySource('classroom'), 2);
+    assert.ok(await context.database.findByExternalId('course-a:same-id', 'classroom'));
+    assert.ok(await context.database.findByExternalId('course-b:same-id', 'classroom'));
   } finally {
-    context.close();
+    await context.close();
   }
 });

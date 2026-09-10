@@ -12,8 +12,8 @@ import {
 } from '../src/classroom-provider.js';
 import { createClassroomWebClient } from '../src/classroom-web.js';
 import { createEmptyState } from '../src/state.js';
-import { createHomeworkDatabase } from '../src/homework-db.js';
 import { syncAllHomeworks } from '../src/bot-sync.js';
+import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 test('Classroom web assignment maps course, identity, canonical link, and Kyiv due fields', () => {
   const task = normalizeClassroomWebAssignment(
@@ -129,39 +129,29 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
   assert.match(logs[0], /ignored by updatedAt cutoff: 1/);
 });
 
-test('web Classroom configuration takes precedence over the official fallback', () => {
-  let officialCalls = 0;
+test('web Classroom configuration selects the authenticated web provider', () => {
   const client = createConfiguredClassroomClient({
     env: { CLASSROOM_COOKIE_HEADER: 'x=y' },
     logger: () => {},
-    officialClientFactory: () => {
-      officialCalls += 1;
-      return { mode: 'official' };
-    },
   });
 
   assert.equal(client.mode, 'web');
-  assert.equal(officialCalls, 0);
 });
 
-test('official Classroom fallback remains available without web cookie configuration', () => {
-  let officialCalls = 0;
+test('Classroom is disabled without web cookies and never falls back to the official API', () => {
+  const logs = [];
   const client = createConfiguredClassroomClient({
     env: {},
     webClientOptions: { defaultCookiesPath: 'missing-classroom-cookies.json' },
-    logger: () => {},
-    officialClientFactory: () => {
-      officialCalls += 1;
-      return { mode: 'official' };
-    },
+    logger: (message) => logs.push(message),
   });
 
-  assert.equal(client.mode, 'official');
-  assert.equal(officialCalls, 1);
+  assert.equal(client, null);
+  assert.match(logs.join('\n'), /official API disabled/);
 });
 
 test('web Classroom tasks enter the same combined sync and database as E-school tasks', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const classroom = createClassroomWebProvider({
     client: {
       async getCourses() {
@@ -203,19 +193,19 @@ test('web Classroom tasks enter the same combined sync and database as E-school 
 
     assert.equal(result.baselineInitialized, true);
     assert.equal(messages.length, 0);
-    assert.equal(database.countBySource('eschool'), 1);
-    assert.equal(database.countBySource('classroom'), 1);
+    assert.equal(await database.countBySource('eschool'), 1);
+    assert.equal(await database.countBySource('classroom'), 1);
     assert.deepEqual(
-      database.currentTasks().map((task) => task.source).sort(),
+      (await database.currentTasks()).map((task) => task.source).sort(),
       ['classroom', 'eschool'],
     );
   } finally {
-    database.close();
+    await database.close();
   }
 });
 
 test('combined sync logger does not expose sensitive Classroom network error text', async () => {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+  const { database } = await createTestDatabase();
   const logs = [];
   const marker = 'CLASSROOM_LOG_SECRET_MARKER';
   const classroomClient = createClassroomWebClient({
@@ -240,6 +230,6 @@ test('combined sync logger does not expose sensitive Classroom network error tex
     assert.doesNotMatch(logs.join('\n'), new RegExp(marker));
     assert.match(logs.join('\n'), /Classroom request failed due to a network error/);
   } finally {
-    database.close();
+    await database.close();
   }
 });

@@ -3,8 +3,8 @@ import assert from 'node:assert/strict';
 
 import { createEmptyState } from '../src/state.js';
 import { syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
-import { createHomeworkDatabase } from '../src/homework-db.js';
 import { toSyncTask } from '../src/sync.js';
+import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 const FIXED_NOW = new Date('2026-09-09T12:00:00.000Z');
 
@@ -24,12 +24,12 @@ function homework(overrides = {}) {
   };
 }
 
-function createTestContext(initialState = createEmptyState()) {
-  const database = createHomeworkDatabase({ filePath: ':memory:' });
+async function createTestContext(initialState = createEmptyState()) {
+  const { database } = await createTestDatabase();
   return {
     database,
     legacyStateStore: { load: async () => structuredClone(initialState) },
-    close: () => database.close(),
+    close: async () => database.close(),
   };
 }
 
@@ -46,7 +46,7 @@ function options(context, currentTasks, sendMessageFn) {
 }
 
 test('bot first sync creates baseline and sends no existing homework', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
 
   try {
@@ -59,14 +59,14 @@ test('bot first sync creates baseline and sends no existing homework', async () 
     assert.equal(result.baselineInitialized, true);
     assert.equal(result.taskCount, 1);
     assert.equal(messages.length, 0);
-    assert.equal(context.database.currentTasks().length, 1);
+    assert.equal((await context.database.currentTasks()).length, 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('different homework for one appointment stays separate and keeps stable rows', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   const first = homework({ homeworkId: 201, description: 'Варіант A' });
   const second = homework({ homeworkId: 202, description: 'Варіант B' });
@@ -78,7 +78,7 @@ test('different homework for one appointment stays separate and keeps stable row
       async (...args) => messages.push(args),
     ));
 
-    const baselineRows = context.database.currentTasks();
+    const baselineRows = await context.database.currentTasks();
     assert.equal(baselineRows.length, 2);
     assert.deepEqual(
       baselineRows.map((task) => task.snapshot.description).sort(),
@@ -96,23 +96,23 @@ test('different homework for one appointment stays separate and keeps stable row
 
     assert.equal(messages.length, 0);
     assert.deepEqual(
-      context.database.currentTasks().map((task) => [task.snapshot.description, task.id]),
+      (await context.database.currentTasks()).map((task) => [task.snapshot.description, task.id]),
       [['Варіант A', baselineIds.get('Варіант A')], ['Варіант B', baselineIds.get('Варіант B')]],
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('changing one of two homework items for an appointment preserves both row ids', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   const first = homework({ homeworkId: 301, description: 'Початкове A' });
   const second = homework({ homeworkId: 302, description: 'Початкове B' });
 
   try {
     await syncBotHomeworks(options(context, [first, second], async (...args) => messages.push(args)));
-    const baselineRows = context.database.currentTasks();
+    const baselineRows = await context.database.currentTasks();
     const baselineIds = new Map(
       baselineRows.map((task) => [task.snapshot.description, task.id]),
     );
@@ -128,7 +128,7 @@ test('changing one of two homework items for an appointment preserves both row i
 
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /Изменене A/);
-    const currentRows = context.database.currentTasks();
+    const currentRows = await context.database.currentTasks();
     assert.equal(currentRows.length, 2);
     assert.equal(
       currentRows.find((task) => task.snapshot.description === 'Изменене A').id,
@@ -139,12 +139,12 @@ test('changing one of two homework items for an appointment preserves both row i
       baselineIds.get('Початкове B'),
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('ambiguous changes for one appointment do not reuse one old row twice', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
 
   try {
@@ -156,7 +156,7 @@ test('ambiguous changes for one appointment do not reuse one old row twice', asy
       ],
       async (...args) => messages.push(args),
     ));
-    const baselineIds = new Set(context.database.currentTasks().map((task) => task.id));
+    const baselineIds = new Set((await context.database.currentTasks()).map((task) => task.id));
 
     await syncBotHomeworks(options(
       context,
@@ -167,7 +167,7 @@ test('ambiguous changes for one appointment do not reuse one old row twice', asy
       async (...args) => messages.push(args),
     ));
 
-    const currentRows = context.database.currentTasks();
+    const currentRows = await context.database.currentTasks();
     assert.equal(currentRows.length, 2);
     assert.equal(messages.length, 2);
     assert.equal(currentRows.some((task) => baselineIds.has(task.id)), false);
@@ -176,12 +176,12 @@ test('ambiguous changes for one appointment do not reuse one old row twice', asy
       ['Нове A', 'Нове B'],
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('duplicate normalized fingerprints are stored once', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
 
   try {
     await syncBotHomeworks(options(
@@ -193,14 +193,14 @@ test('duplicate normalized fingerprints are stored once', async () => {
       async () => {},
     ));
 
-    assert.equal(context.database.currentTasks().length, 1);
+    assert.equal((await context.database.currentTasks()).length, 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('bot sends one message for a new homework and does not duplicate it', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   let currentTasks = [homework()];
 
@@ -224,12 +224,12 @@ test('bot sends one message for a new homework and does not duplicate it', async
     assert.equal(messages[0][1].replyMarkup.inline_keyboard[0][0].text, '✅ Позначити виконаним');
     assert.match(messages[0][1].replyMarkup.inline_keyboard[0][0].callback_data, /^complete:\d+$/);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('long notification keeps the full snapshot and does not block the next delivery', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   const longDescription = '&<>😀'.repeat(1400);
   const longTask = homework({
@@ -257,17 +257,17 @@ test('long notification keeps the full snapshot and does not block the next deli
     assert.match(messages[0][0], /скорочено/i);
     assert.match(messages[1][0], /Наступне завдання/);
     assert.equal(
-      context.database.currentTasks().find((task) => task.targetAppointmentId === '185160')
+      (await context.database.currentTasks()).find((task) => task.targetAppointmentId === '185160')
         .snapshot.description,
       longDescription,
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('bot sends an update for a changed description', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   let current = homework();
 
@@ -280,14 +280,14 @@ test('bot sends an update for a changed description', async () => {
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /✏️ Завдання змінено/);
     assert.match(messages[0][0], /оновлений конспект/);
-    assert.equal(context.database.currentTasks().length, 1);
+    assert.equal((await context.database.currentTasks()).length, 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('Telegram failure leaves one task pending without hiding the saved snapshot', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const newTask = homework({ targetAppointmentId: 185142, description: 'Нове завдання' });
   const followingTask = homework({ targetAppointmentId: 185143, description: 'Наступне завдання' });
   const delivered = [];
@@ -305,23 +305,23 @@ test('Telegram failure leaves one task pending without hiding the saved snapshot
       },
     ));
 
-    const pending = context.database.currentTasks().find(
+    const pending = (await context.database.currentTasks()).find(
       (task) => task.targetAppointmentId === '185142',
     );
     assert.ok(pending);
     assert.equal(pending.notificationPending, true);
     assert.equal(pending.lastNotifiedAt, null);
     assert.deepEqual(delivered, ['Наступне завдання']);
-    assert.equal(context.database.currentTasks().length, 3);
+    assert.equal((await context.database.currentTasks()).length, 3);
     assert.equal(result.sentTasks, 1);
     assert.equal(result.deliveryErrors, 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('pending notification is retried after the task disappears from the provider response', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const missingTask = homework({ targetAppointmentId: 185144, description: 'Зникла з відповіді' });
   let shouldFail = true;
   let deliveryAttempts = 0;
@@ -351,18 +351,18 @@ test('pending notification is retried after the task disappears from the provide
 
     assert.equal(deliveryAttempts, 2);
     assert.equal(
-      context.database.pendingNotifications('eschool').some(
+      (await context.database.pendingNotifications('eschool')).some(
         (task) => task.targetAppointmentId === '185144',
       ),
       false,
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('provider fetch failure still attempts the previously saved notification queue', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const queuedTask = homework({ targetAppointmentId: 185145, description: 'Очікує доставку' });
   let sends = 0;
 
@@ -391,16 +391,16 @@ test('provider fetch failure still attempts the previously saved notification qu
 
     assert.equal(sends, 1);
     assert.equal(
-      context.database.currentTasks().find((task) => task.targetAppointmentId === '185145').notificationPending,
+      (await context.database.currentTasks()).find((task) => task.targetAppointmentId === '185145').notificationPending,
       false,
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('one Telegram 429 stops the current queue without a retry storm', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const first = homework({ targetAppointmentId: 185146, description: '429 A' });
   const second = homework({ targetAppointmentId: 185147, description: '429 B' });
   let sends = 0;
@@ -418,20 +418,20 @@ test('one Telegram 429 stops the current queue without a retry storm', async () 
 
     assert.equal(sends, 1);
     assert.equal(
-      context.database.currentTasks().find((task) => task.targetAppointmentId === '185146').notificationPending,
+      (await context.database.currentTasks()).find((task) => task.targetAppointmentId === '185146').notificationPending,
       true,
     );
     assert.equal(
-      context.database.currentTasks().find((task) => task.targetAppointmentId === '185147').notificationPending,
+      (await context.database.currentTasks()).find((task) => task.targetAppointmentId === '185147').notificationPending,
       true,
     );
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
-test('snapshot transaction rolls back all source changes on a mid-write failure', () => {
-  const context = createTestContext();
+test('snapshot transaction rolls back all source changes on a mid-write failure', async () => {
+  const context = await createTestContext();
   const circularHomeworkIds = [];
   circularHomeworkIds.push(circularHomeworkIds);
   const first = toSyncTask(homework({ targetAppointmentId: 185148, description: 'До ошибки' }));
@@ -441,30 +441,31 @@ test('snapshot transaction rolls back all source changes on a mid-write failure'
   };
 
   try {
-    context.database.saveBaseline([first], FIXED_NOW.toISOString(), { source: 'eschool' });
-    assert.throws(
+    await context.database.saveBaseline([first], FIXED_NOW.toISOString(), { source: 'eschool' });
+    const previous = await context.database.findMatch(first);
+    await assert.rejects(
       () => context.database.applyProviderSnapshot(
         [
-          { task: first, previous: context.database.findMatch(first), notificationKind: null },
+          { task: first, previous, notificationKind: null },
           { task: invalid, previous: null, notificationKind: 'new' },
         ],
         FIXED_NOW.toISOString(),
         { source: 'eschool' },
       ),
-      /Could not save homework task/,
+      /Could not save eschool PostgreSQL snapshot/,
     );
     assert.deepEqual(
-      context.database.currentTasks().map((task) => task.snapshot.description),
+      (await context.database.currentTasks()).map((task) => task.snapshot.description),
       ['До ошибки'],
     );
-    assert.equal(context.database.findByFingerprint(invalid.fingerprint), null);
+    assert.equal(await context.database.findByFingerprint(invalid.fingerprint), null);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('bot deduplicates multiple homework ids into one notification', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const messages = [];
   const duplicateA = homework({ homeworkId: 1, topic: 'Тема A' });
   const duplicateB = homework({
@@ -482,10 +483,10 @@ test('bot deduplicates multiple homework ids into one notification', async () =>
 
     assert.equal(result.baselineInitialized, true);
     assert.equal(result.taskCount, 1);
-    assert.equal(context.database.currentTasks()[0].homeworkIds.length, 2);
+    assert.equal((await context.database.currentTasks())[0].homeworkIds.length, 2);
     assert.equal(messages.length, 0);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
@@ -503,7 +504,7 @@ test('bot imports the existing JSON baseline without notifying old tasks', async
       topics: ['Числові множини'],
     },
   };
-  const context = createTestContext(state);
+  const context = await createTestContext(state);
   const messages = [];
 
   try {
@@ -511,25 +512,25 @@ test('bot imports the existing JSON baseline without notifying old tasks', async
       messages.push(args);
     }));
     assert.equal(messages.length, 0);
-    assert.equal(context.database.currentTasks().length, 1);
+    assert.equal((await context.database.currentTasks()).length, 1);
   } finally {
-    context.close();
+    await context.close();
   }
 });
 
 test('bot sync removes only completed tasks older than fourteen days', async () => {
-  const context = createTestContext();
+  const context = await createTestContext();
   const pending = toSyncTask(homework());
   const oldCompleted = toSyncTask(homework({
     targetAppointmentId: 185142,
     description: 'Старе виконане завдання',
   }));
-  context.database.saveBaseline(
+  await context.database.saveBaseline(
     [pending, oldCompleted],
     '2026-08-01T12:00:00.000Z',
   );
-  const oldRow = context.database.findByFingerprint(oldCompleted.fingerprint);
-  context.database.completeTask(oldRow.id, '2026-08-01T12:00:00.000Z');
+  const oldRow = await context.database.findByFingerprint(oldCompleted.fingerprint);
+  await context.database.completeTask(oldRow.id, '2026-08-01T12:00:00.000Z');
 
   try {
     await syncBotHomeworks(options(
@@ -540,9 +541,9 @@ test('bot sync removes only completed tasks older than fourteen days', async () 
       },
     ));
 
-    assert.equal(context.database.findByFingerprint(oldCompleted.fingerprint), null);
-    assert.ok(context.database.findByFingerprint(pending.fingerprint));
+    assert.equal(await context.database.findByFingerprint(oldCompleted.fingerprint), null);
+    assert.ok(await context.database.findByFingerprint(pending.fingerprint));
   } finally {
-    context.close();
+    await context.close();
   }
 });

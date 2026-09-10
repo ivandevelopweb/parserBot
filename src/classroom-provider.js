@@ -1,9 +1,6 @@
 import { existsSync } from 'node:fs';
 
 import {
-  createClassroomClient,
-} from './classroom.js';
-import {
   CLASSROOM_ORIGIN,
   DEFAULT_CLASSROOM_COOKIES_PATH,
   createClassroomWebClient,
@@ -247,19 +244,20 @@ export function createConfiguredClassroomClient({
   env = process.env,
   logger = console.log,
   webClientOptions = {},
-  officialClientFactory = createClassroomClient,
 } = {}) {
-  if (isClassroomWebConfigured({
+  const webConfigured = isClassroomWebConfigured({
     env,
     defaultCookiesPath: webClientOptions.defaultCookiesPath,
-  })) {
-    logger('[classroom] Using authenticated web session');
-    return createClassroomWebProvider({
-      env,
-      logger,
-      webClientOptions,
-    });
+  });
+  if (!webConfigured) {
+    logger('[classroom] Web session is not configured; skipping Classroom (official API disabled)');
+    return null;
   }
 
-  return officialClientFactory({ logger });
+  logger('[classroom] Using authenticated web session');
+  return createClassroomWebProvider({
+    env,
+    logger,
+    webClientOptions,
+  });
 }

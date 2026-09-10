@@ -10,7 +10,7 @@ import { errorMessage } from './utils.js';
 async function main() {
   const auth = createAuthClient();
   const telegram = createTelegramClient();
-  const database = createHomeworkDatabase();
+  const database = await createHomeworkDatabase();
   const classroom = createConfiguredClassroomClient({ logger: console.log });
 
   try {
@@ -26,7 +26,7 @@ async function main() {
       );
     }
   } finally {
-    database.close();
+    await database.close();
   }
 }
 

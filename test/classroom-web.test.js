@@ -836,13 +836,11 @@ test('coursework decoder extracts the confirmed array-only pONvgf record shape',
 });
 
 test('coursework decoder does not invent assignments from unknown numeric arrays', () => {
-  assert.throws(
-    () => decodeCourseWorkPayload(
-      [[100, null, 1, 0], [[1, 2, 3, 4]]],
-      { courseId: '544644036115' },
-    ),
-    (error) => error.code === 'CLASSROOM_RESPONSE_ERROR',
+  const decoded = decodeCourseWorkPayload(
+    [[100, null, 1, 0], [[1, 2, 3, 4]]],
+    { courseId: '544644036115' },
   );
+  assert.deepEqual(decoded, []);
 });
 
 function courseListRecord(courseId, name, marker = 1) {

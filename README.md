@@ -17,16 +17,15 @@ Developer documentation:
 - [Architecture and trade-offs](docs/ARCHITECTURE.md)
 - [Rules for agents and developers](AGENTS.md)
 
-Read the architecture document before a large change. It describes layer boundaries, fingerprint and snapshot rules, the SQLite lifecycle, Telegram callbacks, and current project limits.
+Read the architecture document before a large change. It describes layer boundaries, fingerprint and snapshot rules, the PostgreSQL lifecycle, Telegram callbacks, and current project limits.
 
 ## Requirements
 
-- Node.js `24.21.0` or a later `24.x` patch below `25`, for built-in
-  `node:sqlite` without an experimental flag;
+- Node.js `24.21.0` or a later `24.x` patch below `25`;
+- a PostgreSQL database URL (Neon is the intended hosted database);
 - a working Єдина школа username and password;
 - a Telegram bot token and chat id;
 - an authenticated Google Classroom browser cookie export for the Classroom web provider and local smoke-tests;
-- Google OAuth variables remain supported by the legacy Classroom API adapter, but are not used by the web smoke-test.
 
 ## Setup and run
 
@@ -43,26 +42,12 @@ ESCHOOL_USERNAME=your_username
 ESCHOOL_PASSWORD=your_password
 TELEGRAM_BOT_TOKEN=your_bot_token
 TELEGRAM_CHAT_ID=your_chat_id
-GOOGLE_CLIENT_ID=
-GOOGLE_CLIENT_SECRET=
-GOOGLE_REFRESH_TOKEN=
 CLASSROOM_COOKIE_HEADER=
 CLASSROOM_COOKIES_JSON=
 CLASSROOM_COOKIES_FILE=classroom-cookies.json
 CLASSROOM_COURSE_ID=544644036115  # only for the single-course smoke-test
+HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 ```
-
-Google Classroom can also be configured locally through the OAuth flow. Put the
-desktop client file in the project root as `google-credentials.json` and run:
-
-```powershell
-npm run classroom:auth
-```
-
-The command opens a browser, requests the read-only Classroom scopes with
-offline consent, and saves the refresh token to `google-token.json`. The token
-file is local-only. A deployed process should use the three `GOOGLE_*`
-environment variables instead of relying on local files.
 
 For the local Classroom web smoke-test, export cookies from an already
 authenticated classroom.google.com browser session and either set
@@ -72,10 +57,10 @@ local secret and is never logged.
 The cookie file is local-only and must never be committed.
 
 The production Classroom path uses the web smoke-test client through the common
-provider adapter instead of this OAuth flow because the Google Workspace
-administrator may block OAuth access. It does not log in with a username or
-password and does not use Playwright. The official API adapter remains a
-fallback when no web cookie source is configured.
+provider adapter. It does not log in with a username or password, does not use
+Playwright, and does not fall back to the official Google Classroom API. If no
+authenticated cookie source is configured, Classroom is skipped and the bot
+logs a safe configuration message.
 
 Run the smoke-test:
 
@@ -84,6 +69,9 @@ npm start
 ```
 
 Run one production sync. The first run parses the current homework immediately:
+
+The command requires `HOMEWORK_DATABASE_URL`; it never falls back to a local
+SQLite file.
 
 ```powershell
 npm run sync
@@ -104,7 +92,7 @@ recursively inspects arrays, objects, and nested JSON strings, then extracts
 only the coursework fields confirmed in the live array response. The command
 follows the confirmed opaque continuation value until the current response set
 ends, with a bounded page limit. It is deliberately not connected to Telegram,
-SQLite, or the production sync.
+PostgreSQL, or the production sync.
 
 Run the dynamic course discovery smoke-test. It loads the visible course list
 from the authenticated Classroom home page and calls the existing coursework
@@ -127,37 +115,41 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older or missing-update records are ignored. Each new or changed task is queued in SQLite and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in SQLite.
+`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older or missing-update records are ignored. Each new or changed task is queued in PostgreSQL and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
 
 ### Render deployment
 
-The repository includes [`render.yaml`](render.yaml) for one Render Background
-Worker. It runs `npm run bot`, needs no public HTTP port, and stores SQLite on a
-1 GB Persistent Disk mounted at `/var/data`. The worker sets
-`HOMEWORK_DATABASE_PATH=/var/data/homeworks.sqlite`; local runs keep using
-`data/homeworks.sqlite` unless `HOMEWORK_DATABASE_PATH` is set.
-The Blueprint pins Node.js `24.21.0` and runs `npm test` after the clean
-production dependency install before a worker can start.
+The repository includes [`render.yaml`](render.yaml) for one free Render Web
+Service. It runs `npm run bot`, exposes `/healthz`, and stores all durable bot
+state in PostgreSQL. No Render Persistent Disk or local SQLite file is used.
+The Blueprint pins Node.js `24.21.0`, installs dev dependencies for the build,
+runs `npm test`, and removes them before the service starts.
 
 After applying the Blueprint, configure these Render environment variables in
 the dashboard: `ESCHOOL_USERNAME`, `ESCHOOL_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
-`TELEGRAM_CHAT_ID`, and the already authenticated Classroom
-`CLASSROOM_COOKIE_HEADER`. Keep the cookie header and all credentials in the
-Render secret store; do not upload `.env`, cookie files, or Google credential
-files. A Classroom browser session can expire and then needs a fresh local
-export. Render's default filesystem is ephemeral, so the disk is required for
-SQLite state to survive deploys and restarts. See the [Render Blueprint
-reference](https://render.com/docs/blueprint-spec) and [Persistent Disk
-documentation](https://render.com/docs/disks).
+`TELEGRAM_CHAT_ID`, `HOMEWORK_DATABASE_URL`, and, when used, the already
+authenticated Classroom `CLASSROOM_COOKIE_HEADER`. Keep the database URL,
+cookie header, and all credentials in the Render secret store; do not upload
+`.env`, cookie files, or Google credential files. A Classroom browser session
+can expire and then needs a fresh local export. Use the Neon pooled connection
+string for `HOMEWORK_DATABASE_URL` and keep connection pooling enabled. See the
+[Render Blueprint reference](https://render.com/docs/blueprint-spec) and
+[free instance documentation](https://render.com/docs/free).
 
-The worker is intentionally single-instance: Telegram long polling and SQLite
-are both process-local. Render must not scale this service horizontally. On
-SIGTERM/SIGINT the bot stops polling, aborts the active HTTP work, waits for
-the sync promise to drain, and only then closes SQLite. The Blueprint gives the
-worker a 120-second shutdown budget; the local tests cover the abort/drain
-contract but do not constitute a live Render shutdown check.
+The service is intentionally single-instance: Telegram long polling has one
+owner, even though PostgreSQL is remote. Render must not scale this service
+horizontally. On SIGTERM/SIGINT the bot stops polling, aborts the active HTTP
+work, waits for the sync promise to drain, and only then closes the PostgreSQL
+pool. The local tests cover the abort/drain contract but do not constitute a
+live Render shutdown check. The free Web Service may sleep when idle; an
+external monitor such as UptimeRobot can request `GET /healthz` if the operator
+wants to reduce sleeping, but configuring that monitor is an operational step
+outside this repository.
 
-On the first run, the existing archive is not sent. It becomes the baseline. If an older `data/state.json` already exists, its baseline is imported into SQLite without sending duplicate notifications.
+On the first run, the existing archive is not sent. It becomes the baseline. If
+an older `data/state.json` already exists, its baseline is imported into
+PostgreSQL without sending duplicate notifications. The JSON file is only a
+one-time compatibility source; PostgreSQL is the active store.
 
 Telegram supports `/start`, `/menu`, `/current`, `/completed`, and `/help`. The main menu also has:
 
@@ -174,17 +166,17 @@ title/description in list links and task buttons is limited to 50 characters
 with an ellipsis; the link, date, subject, and source label remain intact.
 Completed tasks use `❌`, which returns a task to the pending state while
 keeping the completed list open. The menu also has `ℹ️ Довідка` with the
-command list.
+command list; the help screen shows `↩️ До меню` to return to the main menu.
 
-The bot UI state, compact snapshots, and pending notification queue are stored in
-`data/homeworks.sqlite`. Pending tasks are not removed by age. Completed tasks
-are removed after 14 days from `completedAt` during a later sync. A failed
-Telegram request leaves its queue entry pending for a later cycle.
+The bot UI state, compact snapshots, Telegram offset, and pending notification
+queue are stored in PostgreSQL. Pending tasks are not removed by age. Completed
+tasks are removed after 14 days from `completedAt` during a later sync. A
+failed Telegram request leaves its queue entry pending for a later cycle.
 
 The database stores only deduplicated tasks and compact snapshots, not full API
-responses. `data/state.json` is kept as a compatible legacy E-school baseline
-for the transition from the previous JSON sync. Classroom has its own baseline
-marker and never sends all existing coursework on its first sync.
+responses. `data/state.json` is kept only as a compatible legacy E-school
+baseline importer. Classroom has its own baseline marker and never sends all
+existing coursework on its first sync.
 
 To check the Telegram Bot API separately:
 
@@ -210,11 +202,10 @@ The current diary also needs a regular HTTP bootstrap: `GET` and `POST /api/v1/s
 
 Appointment API is queried for Monday through Sunday of the current week in `Europe/Kyiv`. On `401`, `403`, or signs of an expired session, the client first tries a refresh through `/portal`. If that fails, it performs one full login. There is no endless retry.
 
-The existing optional Classroom provider uses the official Google Classroom API
-with read-only course and coursework scopes. That adapter is retained for
-compatibility, but production entry points prefer the authenticated web cookie
-provider when cookie configuration is present. `npm run classroom:smoke` does
-not use OAuth or modify Telegram/SQLite.
+The production Classroom provider uses only the authenticated browser-cookie
+web/RPC path. `npm run classroom:smoke` does not use OAuth or modify
+Telegram/PostgreSQL. The legacy official-API source files are not selected by
+the bot and are outside the supported deployment path.
 The web smoke-test loads an already authenticated browser cookie jar, verifies
 `/a/not-turned-in/all`, extracts dynamic batchexecute bootstrap values, calls
 `pONvgf`, follows its confirmed continuation field, and decodes only explicitly
@@ -225,8 +216,8 @@ protocol name. Smaller experimental values are not used because their chained
 totals varied between requests. The course smoke-test additionally loads `/h` and decodes the
 home-page `gXtzob` response; it selects the visible sidebar records dynamically
 and does not hardcode the account's course ids. The web provider now merges
-eligible normalized coursework into the existing SQLite task table and Telegram
-UI. The first successful Classroom sync creates a provider-specific baseline
+eligible normalized coursework into the PostgreSQL task table and Telegram UI.
+The first successful Classroom sync creates a provider-specific baseline
 without sending the existing tasks as new. Classroom due timestamps are
 converted to `Europe/Kyiv`; tasks without a due date sort last and are labeled
 `Дата здачі не вказана`. Its debug inspector
@@ -241,15 +232,19 @@ The client accepts an Appointment array at the response root or in the `Appointm
 A Єдина школа fingerprint contains `targetAppointmentId` and the normalized
 description. Several `homeworkId` values for one real task become one stored
 task and one notification. Classroom uses the stable course/coursework id
-instead. SQLite stores a source-specific snapshot so the next sync can detect
+instead. PostgreSQL stores a source-specific snapshot so the next sync can detect
 changes to description, title, due date/time, topics, links, files, or the
 Classroom `updateTime`. A provider snapshot and its notification state are
-committed in one SQLite transaction before Telegram is called. A Telegram
+committed in one PostgreSQL transaction before Telegram is called. A Telegram
 failure does not mark the task as sent, so the pending queue can be retried by
 the next iteration. This is at-least-once delivery: a process crash after
-Telegram accepts a message but before SQLite acknowledges it can still produce
+Telegram accepts a message but before PostgreSQL acknowledges it can still produce
 a duplicate.
 
-The old `data/state.json` is still validated and written atomically by the compatible JSON sync module. A damaged file is not silently replaced. `.env`, Google credential/token files, `data/state.json`, and `data/homeworks.sqlite*` are not committed.
+The old `data/state.json` is still validated and written atomically by the
+standalone compatible JSON sync module; the production bot does not use it as
+its primary store. A damaged file is not silently replaced. `.env`, Google
+credential/token files, `data/state.json`, and any old `data/homeworks.sqlite*`
+files are not committed.
 
 Logs do not show passwords, cookies, or full tokens. If a Server Action id or token identifier needs to be shown, only the first 8 and last 6 characters are printed.

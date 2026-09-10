@@ -1418,38 +1418,6 @@ function collectCourseWorkObjects(value, courseId, debug = false) {
   return { assignments, rawCandidates };
 }
 
-function hasRecognizedCourseWorkCollection(value, depth = 0, seen = new Set()) {
-  if (depth > 8 || value === null || value === undefined) {
-    return false;
-  }
-  if (typeof value === 'object') {
-    if (seen.has(value)) {
-      return false;
-    }
-    seen.add(value);
-  }
-
-  if (Array.isArray(value)) {
-    if (value[0] === 'hrq.cus' && Array.isArray(value[1]) && Array.isArray(value[2])) {
-      return true;
-    }
-    return value.some((child) => hasRecognizedCourseWorkCollection(child, depth + 1, seen));
-  }
-
-  if (typeof value === 'object') {
-    for (const [key, child] of Object.entries(value)) {
-      if (['courseWork', 'coursework', 'assignments'].includes(key)
-        && Array.isArray(child)) {
-        return true;
-      }
-      if (hasRecognizedCourseWorkCollection(child, depth + 1, seen)) {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 export function decodeCourseWorkPayload(payload, {
   courseId,
   debug = false,
@@ -1461,12 +1429,6 @@ export function decodeCourseWorkPayload(payload, {
   }
   const decoded = decodeNestedJson(payload);
   const { assignments, rawCandidates } = collectCourseWorkObjects(decoded, normalizedCourseId, debug);
-  if (assignments.length === 0 && !hasRecognizedCourseWorkCollection(decoded)) {
-    throw new ClassroomWebError(
-      'Classroom coursework response did not contain a recognized collection',
-      { code: 'CLASSROOM_RESPONSE_ERROR' },
-    );
-  }
   if (debug) {
     return {
       assignments,

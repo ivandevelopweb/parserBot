@@ -6,7 +6,7 @@ Before a large change, read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md), then i
 
 A change is large when it affects any of these areas:
 
-- the SQLite schema, fingerprint, snapshot, or deduplication rules;
+- the PostgreSQL schema, fingerprint, snapshot, or deduplication rules;
 - login, cookies, diary bootstrap, or Appointment API;
 - Telegram message formats, callback data, commands, or chat access;
 - notification delivery and persistence order;
@@ -36,7 +36,7 @@ For such a change, write a short plan that names the affected layers and trade-o
 - Never log Google client secrets, refresh tokens, or OAuth authorization URLs containing sensitive values.
 - For local checks, pass values through the environment without printing them.
 - `google-credentials.json`, `googlecredentials.json`, and `google-token.json` contain credentials and must not be committed.
-- `data/homeworks.sqlite` and `data/state.json` contain personal homework data and must not be committed.
+- `HOMEWORK_DATABASE_URL`, any Neon/PostgreSQL data, old `data/homeworks.sqlite*`, and `data/state.json` contain personal homework data or access and must not be committed.
 - Do not delete the database, state, or project directory for a “clean test” without an explicit request and a prior target check.
 - Do not send a test message to Telegram without the user's direct permission.
 
@@ -44,7 +44,7 @@ For such a change, write a short plan that names the affected layers and trade-o
 
 1. Read `docs/ARCHITECTURE.md`, `package.json`, `README.md`, and the relevant source files.
 2. Find the existing tests for the contract being changed.
-3. Identify whether the change affects an external side effect: Telegram, login, SQLite writes, or real user data.
+3. Identify whether the change affects an external side effect: Telegram, login, PostgreSQL writes, or real user data.
 4. For a large change, describe the plan and get design approval.
 5. Make the smallest change in the correct layer. Do not duplicate auth, API parsing, or Telegram transport.
 6. Add or update tests next to the changed contract.
@@ -53,17 +53,19 @@ For such a change, write a short plan that names the affected layers and trade-o
 9. If behavior, schema, or a start command changes, update `README.md` and `docs/ARCHITECTURE.md`.
 10. Report changed files, test results, real external actions, and remaining limits.
 
-## SQLite
+## PostgreSQL
 
-The schema and database operations live in `src/homework-db.js`. When changing tables:
+The public database factory is `src/homework-db.js`; schema and database operations live in `src/postgres-homework-db.js`, with shared row/task helpers in `src/homework-db-shared.js`. When changing tables:
 
 - update `DATABASE_VERSION` and add a clear migration plan;
-- preserve existing data or document the incompatible change;
-- test reopening the database;
+- preserve existing data or document the incompatible change; the current clean Neon migration intentionally does not read SQLite;
+- test reopening the PostgreSQL adapter with an artificial database;
 - add a test for the new status, field, or query;
 - never treat manual deletion of `data/homeworks.sqlite` as a migration.
 
-Do not mix the baseline and legacy JSON paths without explaining why. `bot-sync` uses SQLite. `data/state.json` is used only for the first import of old state.
+Do not mix the baseline and legacy JSON paths without explaining why. `bot-sync`
+uses PostgreSQL. `data/state.json` is used only for the first import of old state;
+it is not the active store. There is no SQLite fallback.
 
 ## Telegram
 
@@ -91,7 +93,7 @@ npm run classroom:smoke
 
 `npm start` and `npm run sync` contact Єдина школа. `npm run sync` may send real Telegram notifications when the database has already been initialized and new or changed tasks exist. `npm run telegram:test` always sends a message.
 `npm run classroom:smoke` uses only the local authenticated Classroom cookie
-session and does not change Telegram, SQLite, or the E-school integration.
+session and does not change Telegram, PostgreSQL, or the E-school integration.
 
 ## Change style
 

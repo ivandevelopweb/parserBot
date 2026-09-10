@@ -1,10 +1,11 @@
 services:
-  - type: worker
+  - type: web
     name: homework-parser
     runtime: node
-    plan: "0.5c-512mb"
-    buildCommand: npm ci --omit=dev && npm test
+    plan: free
+    buildCommand: npm ci && npm test && npm prune --omit=dev
     startCommand: npm run bot
+    healthCheckPath: /healthz
     envVars:
       - key: NODE_VERSION
         value: "24.21.0"
@@ -18,9 +19,5 @@ services:
         sync: false
       - key: CLASSROOM_COOKIE_HEADER
         sync: false
-      - key: HOMEWORK_DATABASE_PATH
-        value: /var/data/homeworks.sqlite
-    disk:
-      name: homework-data
-      mountPath: /var/data
-      sizeGB: 1
+      - key: HOMEWORK_DATABASE_URL
+        sync: false

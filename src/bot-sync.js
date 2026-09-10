@@ -5,7 +5,6 @@ import {
   formatNewHomeworkMessage,
 } from './messages.js';
 import { createStateStore } from './state.js';
-import { createHomeworkDatabase } from './homework-db.js';
 import { toSyncTask } from './sync.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
 
@@ -121,7 +120,7 @@ async function initializeDatabase({
   logger,
 }) {
   const metaKey = providerBaselineKey(source);
-  if (database.getMeta(metaKey)) {
+  if (await database.getMeta(metaKey)) {
     return { imported: false, initialized: false };
   }
 
@@ -131,23 +130,23 @@ async function initializeDatabase({
       const legacyTasks = Object.entries(legacyState.tasks).map(([key, entry]) => (
         legacyEntryToTask(key, entry)
       ));
-      database.importLegacyState(legacyTasks, legacyState.initializedAt);
+      await database.importLegacyState(legacyTasks, legacyState.initializedAt);
       logger(`[bot-sync] Imported ${legacyTasks.length} tasks from the existing JSON baseline`);
       return { imported: true, initialized: true };
     }
   }
 
-  database.saveBaseline(currentTasks, timestamp, { source });
+  await database.saveBaseline(currentTasks, timestamp, { source });
   logger(`[bot-sync] Baseline initialized for ${source} with ${currentTasks.length} tasks`);
   return { imported: false, initialized: true };
 }
 
-function removeExpiredCompletedTasks(database, timestamp, logger) {
+async function removeExpiredCompletedTasks(database, timestamp, logger) {
   const cleanupCutoff = new Date(
     new Date(timestamp).getTime() - COMPLETED_TASK_RETENTION_MS,
   ).toISOString();
   const removedCompletedTasks = typeof database.deleteCompletedBefore === 'function'
-    ? database.deleteCompletedBefore(cleanupCutoff)
+    ? await database.deleteCompletedBefore(cleanupCutoff)
     : 0;
   if (removedCompletedTasks > 0) {
     logger(`[bot-sync] Removed ${removedCompletedTasks} completed tasks older than 14 days`);
@@ -178,7 +177,7 @@ async function deliverPendingNotifications({
   signal,
 } = {}) {
   const pendingTasks = typeof database.pendingNotifications === 'function'
-    ? database.pendingNotifications(source)
+    ? await database.pendingNotifications(source)
     : [];
   let sentTasks = 0;
   let deliveryErrors = 0;
@@ -218,7 +217,7 @@ async function deliverPendingNotifications({
     }
 
     try {
-      database.recordNotificationSuccess(task.id, new Date(now).toISOString());
+      await database.recordNotificationSuccess(task.id, new Date(now).toISOString());
       sentTasks += 1;
     } catch (error) {
       deliveryErrors += 1;
@@ -293,8 +292,11 @@ export async function syncProviderHomeworks({
   }
 
   const matchedTasks = typeof database.findMatches === 'function'
-    ? database.findMatches(currentTasks)
-    : currentTasks.map((task) => ({ task, previous: database.findMatch(task) }));
+    ? await database.findMatches(currentTasks)
+    : await Promise.all(currentTasks.map(async (task) => ({
+      task,
+      previous: await database.findMatch(task),
+    })));
   const notificationPlan = [];
   let newTasks = 0;
   let updatedTasks = 0;
@@ -309,12 +311,12 @@ export async function syncProviderHomeworks({
   }
 
   if (typeof database.applyProviderSnapshot === 'function') {
-    database.applyProviderSnapshot(notificationPlan, timestamp, { source });
+    await database.applyProviderSnapshot(notificationPlan, timestamp, { source });
   } else {
     // Compatibility fallback for test doubles that predate the transactional
     // database API. The production database always takes the transaction path.
     for (const entry of notificationPlan) {
-      database.upsertSeenTask(entry.task, {
+      await database.upsertSeenTask(entry.task, {
         timestamp,
         notificationKind: entry.notificationKind,
         previous: entry.previous,
@@ -346,7 +348,7 @@ export async function syncProviderHomeworks({
 
 export async function syncBotHomeworks({
   auth,
-  database = createHomeworkDatabase(),
+  database,
   legacyStateStore = createStateStore(),
   getAppointmentsFn = getAppointments,
   sendMessageFn,
@@ -377,14 +379,14 @@ export async function syncBotHomeworks({
     now,
     signal,
   });
-  removeExpiredCompletedTasks(database, new Date(now).toISOString(), logger);
+  await removeExpiredCompletedTasks(database, new Date(now).toISOString(), logger);
   return result;
 }
 
 export async function syncAllHomeworks({
   auth,
   classroom = null,
-  database = createHomeworkDatabase(),
+  database,
   legacyStateStore = createStateStore(),
   getAppointmentsFn = getAppointments,
   getClassroomHomeworksFn,
@@ -478,7 +480,7 @@ export async function syncAllHomeworks({
     }
   }
 
-  removeExpiredCompletedTasks(database, new Date(now).toISOString(), logger);
+  await removeExpiredCompletedTasks(database, new Date(now).toISOString(), logger);
   const failedProviders = providers.filter((provider) => provider.status === 'error');
   const result = {
     baselineInitialized: providers.some((provider) => provider.baselineInitialized),
