@@ -802,6 +802,7 @@ test('coursework decoder extracts only explicit coursework fields and attachment
       description: 'Прочитати розділ',
       dueAt: '2026-09-11T08:00:00Z',
       updateTime: '2026-09-09T09:00:00Z',
+      alternateLink: 'https://classroom.google.com/custom/course-work',
       materials: [{
         link: { url: 'https://example.test/task-file' },
       }],
@@ -817,6 +818,7 @@ test('coursework decoder extracts only explicit coursework fields and attachment
     dueAt: '2026-09-11T08:00:00.000Z',
     updatedAt: '2026-09-09T09:00:00.000Z',
     attachments: [{ url: 'https://example.test/task-file' }],
+    url: 'https://classroom.google.com/custom/course-work',
   }]);
 
   const debug = decodeCourseWorkPayload(payload, { courseId: '544644036115', debug: true });

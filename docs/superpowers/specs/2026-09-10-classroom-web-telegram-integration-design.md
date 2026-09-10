@@ -182,10 +182,11 @@ courses remains two tasks.
 
 The current array-only pONvgf decoder does not expose a verified alternateLink
 field. The adapter therefore uses the deterministic Classroom details route
-based on the already identified ids:
+based on the already identified ids, encoded with Classroom's URL-safe route
+codec:
 
 ~~~
-https://classroom.google.com/c/{courseId}/a/{assignmentId}/details
+https://classroom.google.com/c/{encodedCourseId}/a/{encodedAssignmentId}/details
 ~~~
 
 If a future decoder exposes an explicit link, that value takes precedence. The

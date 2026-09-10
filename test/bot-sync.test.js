@@ -778,6 +778,47 @@ test('Classroom ignores updatedAt-only changes, notifies content changes, and se
   }
 });
 
+test('Classroom URL-format migration updates the snapshot without a false notification', async () => {
+  const context = await createTestContext();
+  const messages = [];
+  const legacyTask = classroomHomework({
+    courseId: '876750472074',
+    courseWorkId: '878258754750',
+    externalId: '876750472074:878258754750',
+    url: 'https://classroom.google.com/c/876750472074/a/878258754750/details',
+  });
+  const correctedTask = classroomHomework({
+    courseId: '876750472074',
+    courseWorkId: '878258754750',
+    externalId: '876750472074:878258754750',
+    url: 'https://classroom.google.com/c/ODc2NzUwNDcyMDc0/a/ODc4MjU4NzU0NzUw/details',
+  });
+
+  try {
+    await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task: legacyTask, status: 'pending' }]),
+      async (...args) => messages.push(args),
+    ));
+    const result = await syncProviderHomeworks(classroomSyncOptions(
+      context,
+      classroomResult([{ task: correctedTask, status: 'pending' }]),
+      async (...args) => messages.push(args),
+      { now: new Date('2026-09-09T13:00:00.000Z') },
+    ));
+
+    assert.equal(result.updatedTasks, 0);
+    assert.equal(messages.length, 0);
+    const stored = await context.database.findByExternalId(
+      '876750472074:878258754750',
+      'classroom',
+    );
+    assert.equal(stored.snapshot.url, correctedTask.snapshot.url);
+  } finally {
+    await context.close();
+  }
+});
+
 test('Classroom deduplicates provider ids but keeps equal titles in different courses separate', async () => {
   const context = await createTestContext();
   const first = classroomHomework({ title: 'Однакова назва', description: 'Однакова назва' });

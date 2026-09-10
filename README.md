@@ -162,8 +162,8 @@ Telegram supports `/start`, `/menu`, `/current`, `/completed`, and `/help`. The 
 
 Homework lists are grouped by date. Each homework title is an inline link to
 the source task: Єдина школа uses the diary URL and Classroom uses its direct
-details URL (or an explicit `alternateLink` when available). The source label
-is shown as `(Єдина школа)` or `(Classroom)`.
+details URL with Classroom's encoded route ids (or an explicit `alternateLink`
+when available). The source label is shown as `(Єдина школа)` or `(Classroom)`.
 Current tasks use `✅` callback buttons in a two-column grid, with no more than
 six tasks per page and pagination. For readability, the visible assignment
 title/description in list links and task buttons is limited to 50 characters

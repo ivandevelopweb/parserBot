@@ -41,7 +41,14 @@ test('Classroom web assignment maps course, identity, canonical link, and Kyiv d
   assert.equal(task.snapshot.filesCount, 1);
   assert.equal(
     task.snapshot.url,
-    'https://classroom.google.com/c/course-1/a/work-1/details',
+    'https://classroom.google.com/c/Y291cnNlLTFa/a/d29yay0x/details',
+  );
+});
+
+test('Classroom assignment URL uses the same route tokens as the Classroom UI', () => {
+  assert.equal(
+    buildClassroomAssignmentUrl('876750472074', '878258754750'),
+    'https://classroom.google.com/c/ODc2NzUwNDcyMDc0/a/ODc4MjU4NzU0NzUw/details',
   );
 });
 
@@ -57,7 +64,10 @@ test('explicit Classroom link takes precedence over the canonical details route'
   );
 
   assert.equal(task.snapshot.url, 'https://classroom.google.com/custom/task');
-  assert.equal(buildClassroomAssignmentUrl('course-1', 'work-1'), 'https://classroom.google.com/c/course-1/a/work-1/details');
+  assert.equal(
+    buildClassroomAssignmentUrl('course-1', 'work-1'),
+    'https://classroom.google.com/c/Y291cnNlLTFa/a/d29yay0x/details',
+  );
 });
 
 test('Classroom cutoff uses inclusive September 1 midnight in Kyiv and rejects unknown timestamps', () => {

@@ -140,6 +140,13 @@ fixed import cutoff using `updatedAt` as the accepted publication proxy, maps
 due timestamps to the Kyiv calendar, and returns common tasks. Raw responses
 remain isolated and are never stored in PostgreSQL.
 
+When the array response does not provide an explicit `alternateLink`, the
+provider builds `/c/{courseId}/a/{courseWorkId}/details` with Classroom's
+URL-safe route-id codec (the raw ids are encoded before entering the path).
+The message formatter also normalizes older raw-id snapshots, and change
+detection compares the normalized route so this compatibility repair cannot
+create a false Classroom notification.
+
 `getCourses()` loads `/h` through the same authenticated cookie jar and calls
 the home-page `gXtzob` RPC with its observed opaque mask. In the live response,
 the metadata array contained 37 course records; the protocol discriminator at

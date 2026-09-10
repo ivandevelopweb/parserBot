@@ -1,7 +1,6 @@
 import { existsSync } from 'node:fs';
 
 import {
-  CLASSROOM_ORIGIN,
   CLASSROOM_COMPLETED_STATES,
   DEFAULT_CLASSROOM_COOKIES_PATH,
   CLASSROOM_NOT_TURNED_IN_STATES,
@@ -17,6 +16,9 @@ import {
   SmokeTestError,
   normalizeDescription,
 } from './utils.js';
+import { buildClassroomAssignmentUrl } from './classroom-url.js';
+
+export { buildClassroomAssignmentUrl } from './classroom-url.js';
 
 export const CLASSROOM_IMPORT_TIME_ZONE = 'Europe/Kyiv';
 export const CLASSROOM_IMPORT_CUTOFF = '2026-09-01T00:00:00+03:00';
@@ -116,23 +118,6 @@ function formatDueAtInKyiv(dueAt) {
       ? [parts.hour, parts.minute].join(':')
       : null,
   };
-}
-
-export function buildClassroomAssignmentUrl(courseId, assignmentId) {
-  const normalizedCourseId = String(courseId ?? '').trim();
-  const normalizedAssignmentId = String(assignmentId ?? '').trim();
-  if (!normalizedCourseId || !normalizedAssignmentId) {
-    return null;
-  }
-
-  return [
-    CLASSROOM_ORIGIN,
-    'c',
-    encodeURIComponent(normalizedCourseId),
-    'a',
-    encodeURIComponent(normalizedAssignmentId),
-    'details',
-  ].join('/');
 }
 
 export function normalizeClassroomWebAssignment(course, assignment, { classroomStatus = null } = {}) {

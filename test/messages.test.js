@@ -125,7 +125,7 @@ test('formatHomeworkList renders Classroom source labels and links', () => {
 
   assert.match(
     view.text,
-    /<a href="https:\/\/classroom\.google\.com\/c\/course-1\/a\/work-1\/details">Рціональні вирази №91-100 \(Classroom\)<\/a>/,
+    /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0x\/details">Рціональні вирази №91-100 \(Classroom\)<\/a>/,
   );
   assert.equal(
     view.keyboard.inline_keyboard[0][0].text,
@@ -219,13 +219,32 @@ test('long Classroom notifications are shortened without breaking HTML and keep 
   assert.match(message, /скорочено/i);
   assert.match(
     message,
-    /<a href="https:\/\/classroom\.google\.com\/c\/course-1\/a\/work-1\/details">Відкрити повне завдання<\/a>/,
+    /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0x\/details">Відкрити повне завдання<\/a>/,
   );
   assert.match(message, /Урок &lt;1&gt;/);
   assert.match(message, /10:00 &amp; &lt;x&gt;/);
   assert.equal((message.match(/<a\b/g) ?? []).length, (message.match(/<\/a>/g) ?? []).length);
   assert.doesNotMatch(message, /<(?:a|\/a)\b[^>]*$/);
   assert.doesNotMatch(message, /&(?:amp|lt|gt|quot)?$/);
+});
+
+test('Classroom list repairs a previously stored raw-id assignment link', () => {
+  const view = formatHomeworkList([{
+    id: 13,
+    source: 'classroom',
+    snapshot: {
+      source: 'classroom',
+      title: 'Діагностичне завдання',
+      description: 'Перевірити посилання',
+      targetDate: '2026-09-11',
+      url: 'https://classroom.google.com/c/876750472074/a/878258754750/details',
+    },
+  }]);
+
+  assert.match(
+    view.text,
+    /<a href="https:\/\/classroom\.google\.com\/c\/ODc2NzUwNDcyMDc0\/a\/ODc4MjU4NzU0NzUw\/details">Діагностичне завдання \(Classroom\)<\/a>/,
+  );
 });
 
 test('long URLs are omitted when they cannot fit instead of corrupting HTML', () => {

@@ -6,6 +6,7 @@ import {
 } from './messages.js';
 import { createStateStore } from './state.js';
 import { toSyncTask } from './sync.js';
+import { normalizeClassroomAssignmentUrl } from './classroom-url.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
 import { CLASSROOM_STATUS_RECONCILED_META_KEY } from './homework-db-shared.js';
 
@@ -136,15 +137,22 @@ function getProviderSnapshot(result, source) {
   };
 }
 
-function snapshotComparable(snapshot, { includeUpdatedAt = true } = {}) {
+function snapshotComparable(snapshot, { includeUpdatedAt = true, source = null } = {}) {
+  const snapshotSource = String(source ?? snapshot?.source ?? 'eschool');
+  const rawUrl = String(snapshot?.url ?? snapshot?.alternateLink ?? snapshot?.homeworkUrl ?? '');
   const value = {
-    source: String(snapshot?.source ?? 'eschool'),
+    source: snapshotSource,
     title: normalizeDescription(snapshot?.title ?? snapshot?.description),
     description: normalizeDescription(snapshot?.description),
     targetDate: String(snapshot?.targetDate ?? ''),
     targetTime: String(snapshot?.targetTime ?? ''),
     topics: Array.isArray(snapshot?.topics) ? snapshot.topics.map(normalizeTopic) : [],
-    url: String(snapshot?.url ?? snapshot?.alternateLink ?? snapshot?.homeworkUrl ?? ''),
+    // The direct Classroom route is derived from stable ids. Comparing its
+    // old raw-id form with the corrected encoded form would create a false
+    // "changed" notification during the link-format migration.
+    url: snapshotSource === CLASSROOM_SOURCE
+      ? normalizeClassroomAssignmentUrl(rawUrl)
+      : rawUrl,
     filesCount: Number(snapshot?.filesCount ?? 0),
   };
   if (includeUpdatedAt) {
@@ -159,8 +167,13 @@ function snapshotsChanged(previous, current, source = null) {
   const isClassroom = source === CLASSROOM_SOURCE
     || String(left.source ?? right.source ?? ESCHOOL_SOURCE) === CLASSROOM_SOURCE;
 
-  return JSON.stringify(snapshotComparable(left, { includeUpdatedAt: !isClassroom }))
-    !== JSON.stringify(snapshotComparable(right, { includeUpdatedAt: !isClassroom }));
+  return JSON.stringify(snapshotComparable(left, {
+    includeUpdatedAt: !isClassroom,
+    source,
+  })) !== JSON.stringify(snapshotComparable(right, {
+    includeUpdatedAt: !isClassroom,
+    source,
+  }));
 }
 
 function legacyEntryToTask(key, entry) {

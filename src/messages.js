@@ -1,5 +1,6 @@
 import { buildHomeworkWebUrl } from './eschool.js';
 import { MAX_TELEGRAM_MESSAGE_LENGTH } from './telegram.js';
+import { normalizeClassroomAssignmentUrl } from './classroom-url.js';
 import { formatDateForDisplay, normalizeDescription, uniqueStable } from './utils.js';
 
 function getSnapshot(task) {
@@ -59,7 +60,12 @@ function getHomeworkWebUrlCandidates(task) {
   ];
   const safeExplicitUrls = explicitUrls
     .filter((value) => value && isSafeHomeworkUrl(value))
-    .map((value) => String(value).trim());
+    .map((value) => {
+      const normalized = String(value).trim();
+      return getSource(task) === 'classroom'
+        ? normalizeClassroomAssignmentUrl(normalized)
+        : normalized;
+    });
 
   const ids = [
     ...(Array.isArray(task?.homeworkIds) ? task.homeworkIds : []),

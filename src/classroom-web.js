@@ -1327,6 +1327,7 @@ function normalizeCourseWorkObject(object, courseId, isCourseWorkContext) {
       ?? object.updateTimestamp,
   );
   const attachments = normalizeAttachments(object.attachments ?? object.materials);
+  const explicitUrl = object.url ?? object.alternateLink ?? null;
 
   return {
     source: 'classroom',
@@ -1337,6 +1338,7 @@ function normalizeCourseWorkObject(object, courseId, isCourseWorkContext) {
     dueAt,
     updatedAt,
     attachments,
+    ...(hasValue(explicitUrl) ? { url: String(explicitUrl) } : {}),
   };
 }
 
