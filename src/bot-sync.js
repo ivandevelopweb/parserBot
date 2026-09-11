@@ -13,6 +13,7 @@ import {
 } from './classroom-url.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
 import { CLASSROOM_STATUS_RECONCILED_META_KEY } from './homework-db-shared.js';
+import { isTaskInAccountingPeriod } from './classroom-policy.js';
 
 export const COMPLETED_TASK_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
 export const ESCHOOL_SOURCE = 'eschool';
@@ -64,6 +65,7 @@ function getTasksFromProviderResult(result, source) {
 
   const seenIdentities = new Set();
   return normalizedTasks.filter((task) => {
+    if (!isTaskInAccountingPeriod(task)) return false;
     const identity = source === CLASSROOM_SOURCE
       ? `${source}:external:${task.externalId ?? task.snapshot?.externalId ?? task.fingerprint}`
       : `${source}:fingerprint:${task.fingerprint}`;
@@ -279,7 +281,8 @@ async function deliverPendingNotifications({
     if (typeof database.findById === 'function') {
       try {
         const latest = await database.findById(task.id);
-        if (!latest || !latest.notificationPending || latest.status === 'completed') {
+        if (!latest || !latest.notificationPending || latest.status === 'completed'
+          || !isTaskInAccountingPeriod(latest)) {
           if (latest?.status === 'completed' && latest.notificationPending
             && typeof database.clearNotification === 'function') {
             await database.clearNotification(latest.id, new Date(now).toISOString());

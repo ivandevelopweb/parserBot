@@ -25,6 +25,7 @@ function classroomHomework(overrides = {}) {
     targetTime: '11:25',
     url: 'https://classroom.google.com/c/course-1/a/work-1/details',
     updatedAt: '2026-09-09T10:00:00Z',
+    publishedAt: '2026-09-09T10:00:00Z',
     materials: [],
     ...overrides,
   };

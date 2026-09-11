@@ -120,7 +120,7 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Web assignments with `updatedAt` on or after September 1, 2026 are imported; older records are still scanned for status changes but are not newly imported as pending work. Classroom reads explicit not-turned-in and turned-in state filters, updates the stable course-qualified row, and treats only confirmed completed/returned states as completed; ambiguous states preserve the previous status. The first Classroom status reconciliation is quiet and recorded in PostgreSQL. Each new or changed task is queued in PostgreSQL and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
+`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Only assignments published on or after September 1, 2026 (Kyiv midnight) are included, for both pending and completed work. Neither edits nor due dates determine eligibility. Existing rows without publication remain hidden until the next successful scan fills their `publishedAt` snapshot field; data is not deleted. Classroom reads explicit not-turned-in and turned-in state filters, updates the stable course-qualified row, and treats only confirmed completed/returned states as completed; ambiguous states preserve the previous status. The first Classroom status reconciliation is quiet and recorded in PostgreSQL. Each new or changed task is queued in PostgreSQL and sent as a separate message with an inline `Позначити виконаним` button. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
 
 ### Render deployment
 
@@ -192,8 +192,8 @@ For expired Classroom tasks, cleanup keeps only the course-qualified external
 id in `classroom_task_tombstones`, in the same transaction that deletes the
 task and its text/snapshot. Later completed or unknown observations cannot
 reimport that id, including after a restart. A confirmed pending observation
-clears the marker and allows the task to return, even if it predates the import
-cutoff; old status-only restorations are quiet. These small markers have no
+clears the marker and allows the task to return only when its publication is
+within the accounting period. These small markers have no
 age-based expiry. Manual completion/restoration overrides remain in force while
 the full task row exists; after cleanup only its identity is retained.
 
@@ -261,7 +261,12 @@ erase a due date or link from a richer one. The first successful
 Classroom sync creates a provider-specific baseline and status reconciliation
 without sending existing tasks as new. Classroom due timestamps are converted
 to `Europe/Kyiv`, while date-only due tuples are preserved as calendar dates;
-tasks without a due date sort last and are labeled `Дата
+For type-2 assignments, the decoder reads the due timestamp from the sibling
+metadata in the existing web/RPC response, before extracting the base record.
+No additional request is needed. After deploying this fix, the next successful
+sync refreshes stored deadlines and may send changed-task notifications through
+the existing queue; previously sent messages are not edited automatically.
+Tasks without a due date sort last and are labeled `Дата
 здачі не вказана`. Its debug inspector
 examines the raw `wrb.fr` frames before nested JSON decoding and recursively
 walks every decoded array, object, and nested JSON string, so a raw JSON

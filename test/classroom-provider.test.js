@@ -12,10 +12,37 @@ import {
   isClassroomAssignmentAfterCutoff,
   normalizeClassroomWebAssignment,
 } from '../src/classroom-provider.js';
-import { createClassroomWebClient } from '../src/classroom-web.js';
+import { createClassroomWebClient, decodeCourseWorkPayload } from '../src/classroom-web.js';
+import { formatNewHomeworkMessage } from '../src/messages.js';
 import { createEmptyState } from '../src/state.js';
 import { syncAllHomeworks } from '../src/bot-sync.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
+
+test('live-shaped assignment due date survives decoding, storage, and Telegram formatting', async () => {
+  const record = Array(28).fill(null);
+  record[0] = ['work-1', ['course-1']];
+  record[2] = 1789110158502;
+  record[5] = 'Assignment';
+  record[9] = [2, ['author'], 1789110157405];
+  const payload = ['hrsi.qr', [false], [
+    [2, [record, [1789754340000, 1789110158502, true, 12, false]]],
+  ]];
+  const [assignment] = decodeCourseWorkPayload(payload, { courseId: 'course-1' });
+  const task = normalizeClassroomWebAssignment({ courseId: 'course-1', name: 'Course' }, assignment);
+  const { database } = await createTestDatabase();
+  try {
+    await database.saveBaseline([task], '2026-09-11T10:00:00Z', { source: 'classroom' });
+    const stored = await database.findMatch(task);
+    assert.equal(stored.snapshot.targetDate, '2026-09-18');
+    assert.equal(stored.snapshot.targetTime, '20:59');
+    const message = formatNewHomeworkMessage(stored);
+    assert.match(message, /18\.09\.2026/);
+    assert.match(message, /20:59/);
+    assert.doesNotMatch(message, /Дата здачі не вказана/);
+  } finally {
+    await database.close();
+  }
+});
 
 test('Classroom web assignment maps course, identity, canonical link, and Kyiv due fields', () => {
   const task = normalizeClassroomWebAssignment(
@@ -72,15 +99,15 @@ test('explicit Classroom link takes precedence over the canonical details route'
 
 test('Classroom cutoff uses inclusive September 1 midnight in Kyiv and rejects unknown timestamps', () => {
   assert.equal(
-    isClassroomAssignmentAfterCutoff({ updatedAt: CLASSROOM_IMPORT_CUTOFF }),
+    isClassroomAssignmentAfterCutoff({ publishedAt: CLASSROOM_IMPORT_CUTOFF }),
     true,
   );
   assert.equal(
-    isClassroomAssignmentAfterCutoff({ updatedAt: '2026-08-31T20:59:59.000Z' }),
+    isClassroomAssignmentAfterCutoff({ publishedAt: '2026-08-31T20:59:59.000Z' }),
     false,
   );
   assert.equal(
-    isClassroomAssignmentAfterCutoff({ updatedAt: '2026-09-01T00:00:00.000Z' }),
+    isClassroomAssignmentAfterCutoff({ publishedAt: '2026-09-01T00:00:00.000Z' }),
     true,
   );
   assert.equal(isClassroomAssignmentAfterCutoff({ updatedAt: null }), false);
@@ -102,6 +129,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
           {
             assignmentId: 'old',
             title: 'Старе завдання',
+            publishedAt: '2022-09-01T10:00:00Z',
             updatedAt: '2026-08-31T20:59:59.000Z',
           },
           {
@@ -109,6 +137,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
             title: 'Розв’язати вправу',
             description: '',
             dueAt: null,
+            publishedAt: '2026-09-01T00:00:00Z',
             updatedAt: '2026-09-01T00:00:00.000Z',
           },
         ];
@@ -117,6 +146,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
         assignmentId: 'work-2',
         title: 'Повторити тему',
         dueAt: '2026-09-12T08:00:00.000Z',
+        publishedAt: '2026-09-09T00:00:00Z',
         updatedAt: '2026-09-09T00:00:00.000Z',
       }];
     },
@@ -138,7 +168,7 @@ test('Classroom web provider discovers courses, filters old work, and deduplicat
   assert.equal(tasks[1].snapshot.targetTime, '11:00');
   assert.match(logs[0], /fetched: 3/);
   assert.match(logs[0], /imported: 2/);
-  assert.match(logs[0], /ignored by updatedAt cutoff: 1/);
+  assert.match(logs[0], /ignored by publication cutoff: 1/);
 });
 
 test('Classroom web provider reads explicit state scans and prioritizes positive completion evidence', async () => {
@@ -149,6 +179,7 @@ test('Classroom web provider reads explicit state scans and prioritizes positive
     title,
     description: title,
     updatedAt,
+    publishedAt: updatedAt,
   });
   const client = {
     supportsStateFilters: true,
@@ -195,6 +226,7 @@ test('Classroom web provider reads explicit state scans and prioritizes positive
     ],
   );
   assert.equal(tasks.statusSyncEnabled, true);
+  assert.equal(tasks.statusUpdates.find(({ task }) => task.externalId === 'course-1:old-done').allowInsert, false);
   assert.equal(tasks.statusReconciliationComplete, true);
   assert.equal(tasks.currentExternalIds.includes('course-1:ambiguous'), true);
 });
@@ -206,6 +238,7 @@ test('Classroom state scans merge a complete due snapshot before marking work co
     title: 'Виконати вправу',
     description: 'Опрацювати параграф',
     dueAt,
+    publishedAt: '2026-09-09T00:00:00Z',
     updatedAt: '2026-09-09T00:00:00.000Z',
   });
   const client = {
@@ -275,6 +308,7 @@ test('web Classroom tasks enter the same combined sync and database as E-school 
           assignmentId: 'work-1',
           title: 'Повторити тему',
           description: 'Вектори',
+          publishedAt: '2026-09-09T09:00:00Z',
           dueAt: '2026-09-11T08:00:00Z',
           updatedAt: '2026-09-09T09:00:00Z',
         }];

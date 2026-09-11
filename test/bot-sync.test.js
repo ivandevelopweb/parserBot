@@ -41,6 +41,7 @@ function classroomHomework(overrides = {}) {
     targetTime: '11:25',
     url: `https://classroom.google.com/c/${courseId}/a/${courseWorkId}/details`,
     updatedAt: '2026-09-09T10:00:00.000Z',
+    publishedAt: '2026-09-09T10:00:00.000Z',
     filesCount: 0,
     ...overrides,
   });
@@ -753,23 +754,23 @@ test('an automatic Classroom completion can be reopened only by a pending provid
   }
 });
 
-test('a first-seen old Classroom assignment already completed is stored quietly', async () => {
+test('a first-seen Classroom assignment published before cutoff is not imported', async () => {
   const context = await createTestContext();
   const messages = [];
   const oldTask = classroomHomework({
-    updatedAt: '2026-08-20T10:00:00.000Z',
+    updatedAt: '2026-09-11T10:00:00.000Z',
+    publishedAt: '2022-09-01T10:00:00.000Z',
   });
 
   try {
     await syncProviderHomeworks(classroomSyncOptions(
       context,
-      classroomResult([{ task: oldTask, status: 'completed', includeTask: false }]),
+      classroomResult([{ task: oldTask, status: 'completed', includeTask: true }]),
       async (...args) => messages.push(args),
     ));
 
     const stored = await context.database.findByExternalId('course-1:work-1', 'classroom');
-    assert.equal(stored.status, 'completed');
-    assert.equal(stored.completionOrigin, 'classroom');
+    assert.equal(stored, null);
     assert.equal(messages.length, 0);
   } finally {
     await context.close();

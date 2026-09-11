@@ -131,7 +131,14 @@ and one retry of the same RPC; a second such failure is returned without
 another refresh. A response without a recognized coursework collection is
 rejected by the provider, so an unknown schema cannot look like an empty
 successful snapshot. The live `hrsi.qr` (QueryStreamItem) envelope is validated
-with coursework nested at `payload[2][i][1][0]`; its terminal empty response
+with coursework nested at `payload[2][i][1][0]`.
+For type-2 assignments, the due timestamp is in the sibling metadata at
+`payload[2][i][1][1][0]`. The decoder reads this before extracting the base
+record, so identity deduplication cannot discard the deadline. When that
+metadata block exists, its due value (including null) takes precedence over
+the legacy base-record due field; bare records retain the legacy decoder.
+This uses the same cookie/RPC response without additional requests.
+The terminal empty response
 `["hrsi.qr", [false]]` is accepted even though it omits the collection.
 Malformed or unrecognized items reject the page instead of producing a partial
 successful snapshot. A controlled live experiment showed that the first
@@ -141,7 +148,7 @@ Debug callers inspect the raw response framing and `wrb.fr` payload field before
 decoding, recursively report validation paths, and save only the response body
 to a timestamped ignored debug artifact. The validated client is connected to
 production sync through `src/classroom-provider.js`. That adapter applies the
-fixed import cutoff using `updatedAt` as the accepted publication proxy, maps
+fixed import cutoff using `publishedAt` from published-state metadata, maps
 due timestamps to the Kyiv calendar, and returns common tasks. Raw responses
 remain isolated and are never stored in PostgreSQL.
 
@@ -194,10 +201,13 @@ adapter merges non-empty fields from observations with equal `updatedAt`
 before status reconciliation, so a sparse provider slice cannot erase a due
 date or link from a richer slice. This remains deliberately bounded because
 the live investigation found a repeatable gap between the separate filtered
-result sets. The adapter filters only newly imported pending/content tasks by
-`updatedAt >= 2026-09-01T00:00:00+03:00`, while status refreshes still search
-for known older rows and may insert a newly seen completed row without a
-notification. It converts `dueAt` to a `targetDate` and `targetTime` in
+result sets. The shared `classroom-policy.js` requires
+`publishedAt >= 2026-09-01T00:00:00+03:00` for pending and completed work.
+The decoder reads base `record[9][2]` for published state 2. Neither
+`updatedAt` nor a deadline substitutes for missing publication. Existing
+out-of-period rows receive quiet snapshot refreshes, not status changes or
+notifications; newly seen out-of-period rows are not imported.
+It converts `dueAt` to a `targetDate` and `targetTime` in
 `Europe/Kyiv`; missing due dates sort after dated tasks and are labeled `Дата
 здачі не вказана` in the Telegram list.
 
@@ -279,6 +289,7 @@ lessonNumber
 startTime
 url
 updatedAt
+publishedAt (Classroom only)
 filesCount
 ```
 
@@ -415,9 +426,8 @@ recreate the expired completed history. E-school cleanup is unchanged.
 
 A complete Classroom snapshot with an explicit pending status clears the marker
 inside the snapshot transaction before applying its task/notification plan.
-This is previously known work, so status-only observations can restore it even
-when `updatedAt` predates the new-import cutoff; these old restorations are
-quiet. Eligible tasks in the content plan use normal notification delivery.
+Only work published within the accounting period can clear the marker and
+return. Eligible tasks in the content plan use normal notification delivery.
 Manual overrides protect rows while they exist, but retention keeps only their
 identity; a confirmed pending observation may therefore restore an expired
 manually completed task too. Unknown or conflicting statuses cannot reopen it.
@@ -574,9 +584,15 @@ The upside is that it follows the same data path as the already authenticated
 Classroom web interface and does not require administrator-approved OAuth. The
 cost is that the RPC is undocumented, its opaque mask and response schema can
 change without notice, and a valid HTTP 200 is not sufficient evidence of a
-working decoder. The current production policy also uses `updatedAt` as a
-publication proxy, so an older assignment edited after the cutoff can be
-imported until a verified publication field is available.
+working decoder. Publication and modification timestamps are kept separate.
+Unknown publication excludes a record until a later scan supplies evidence.
+
+The optional `publishedAt` snapshot field requires no table migration; schema
+version 5 remains compatible. Existing rows are not deleted. Both list queries,
+queued delivery, and completion/restoration callbacks exclude pre-cutoff and
+unknown-publication Classroom rows. The next successful provider scan backfills
+publication in existing snapshots, making eligible rows visible again. Rows
+absent from those scans stay hidden; startup never substitutes modification time.
 
 ### Provider adapters with one task model
 

@@ -76,6 +76,7 @@ export function createHomeworkSnapshot(task) {
       startTime: String(task.startTime ?? '').trim(),
       url: task.url ?? task.alternateLink ?? null,
       updatedAt: task.updatedAt ?? null,
+      publishedAt: task.publishedAt ?? null,
       filesCount: Number.isFinite(Number(task.filesCount))
         ? Number(task.filesCount)
         : 0,

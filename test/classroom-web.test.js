@@ -817,6 +817,7 @@ test('coursework decoder extracts only explicit coursework fields and attachment
     description: 'Прочитати розділ',
     dueAt: '2026-09-11T08:00:00.000Z',
     updatedAt: '2026-09-09T09:00:00.000Z',
+    publishedAt: null,
     attachments: [{ url: 'https://example.test/task-file' }],
     url: 'https://classroom.google.com/custom/course-work',
   }]);
@@ -844,6 +845,7 @@ test('coursework decoder extracts the confirmed array-only pONvgf record shape',
       description: 'Прочитати розділ',
       dueAt: '2026-09-11T08:00:00.000Z',
       updatedAt: '2026-09-09T09:00:00.000Z',
+      publishedAt: '2026-09-09T09:00:00.000Z',
       attachments: [],
     }],
   );
@@ -866,6 +868,7 @@ test('coursework decoder extracts a date-only due tuple', () => {
       description: '',
       dueAt: '2026-09-17',
       updatedAt: '2026-09-09T09:00:00.000Z',
+      publishedAt: '2026-09-09T09:00:00.000Z',
       attachments: [],
     }],
   );
@@ -927,6 +930,26 @@ test('coursework decoder recognizes empty stream-item responses with omitted or 
       { assignments: [], recognized: true },
     );
   }
+});
+
+test('assignment envelope due timestamp takes precedence over base-record metadata', () => {
+  const record = courseWorkArrayRecord('work-1', 'course-1', 'Assignment');
+  record[9] = [2, ['author'], 1789110157405, null, [2026, 9, 11]];
+  const payload = ['hrsi.qr', [false], [
+    [2, [record, [1789754340000, 1789110158502, true, 12, false]]],
+  ]];
+  const decoded = decodeCourseWorkPayload(JSON.stringify(payload), {
+    courseId: 'course-1', debug: true,
+  });
+  assert.equal(decoded.recognized, true);
+  assert.equal(decoded.assignments.length, 1);
+  assert.equal(decoded.assignments[0].dueAt, '2026-09-18T17:59:00.000Z');
+  assert.equal(decoded.rawCandidates.length, 1);
+  assert.deepEqual(decoded.rawCandidates[0].path.slice(-4), [2, 0, 1, 0]);
+
+  payload[2][0][1][1][0] = null;
+  const withoutDue = decodeCourseWorkPayload(payload, { courseId: 'course-1' });
+  assert.equal(withoutDue[0].dueAt, null);
 });
 
 test('coursework decoder rejects malformed and partially unknown stream-item collections', () => {

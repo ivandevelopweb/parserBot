@@ -15,6 +15,7 @@ import {
   taskIdentity,
 } from './homework-db-shared.js';
 import { errorMessage } from './utils.js';
+import { isTaskInAccountingPeriod } from './classroom-policy.js';
 
 const { Pool } = pg;
 
@@ -522,7 +523,7 @@ export async function createPostgresHomeworkDatabase({
         snapshot_json::jsonb ->> 'targetDate',
         id
     `);
-    return result.rows.map(rowToTask);
+    return result.rows.map(rowToTask).filter(isTaskInAccountingPeriod);
   }
 
   async function completedTasks() {
@@ -535,7 +536,7 @@ export async function createPostgresHomeworkDatabase({
         completed_at DESC,
         id
     `);
-    return result.rows.map(rowToTask);
+    return result.rows.map(rowToTask).filter(isTaskInAccountingPeriod);
   }
 
   async function pendingNotifications(source = null) {
@@ -544,7 +545,7 @@ export async function createPostgresHomeworkDatabase({
       WHERE notification_pending = 1
       ORDER BY id
     `);
-    const tasks = result.rows.map(rowToTask);
+    const tasks = result.rows.map(rowToTask).filter(isTaskInAccountingPeriod);
     if (source === null || source === undefined) {
       return tasks;
     }
@@ -645,8 +646,23 @@ export async function createPostgresHomeworkDatabase({
       taskExternalId,
       'classroom',
     );
+    // Refresh publication evidence for pre-policy rows without importing or
+    // reconciling out-of-period history. Unknown publication is not eligibility.
+    if (!isTaskInAccountingPeriod(task)) {
+      if (!existing) {
+        return null;
+      }
+      const refreshed = await updateClassroomTaskSnapshotWithExecutor(
+        executor, task, timestamp, existing.id,
+      );
+      await executor.query(`
+        UPDATE homework_tasks
+        SET notification_pending = 0, notification_kind = NULL WHERE id = $1
+      `, [existing.id]);
+      return { ...refreshed, notificationPending: false, notificationKind: null };
+    }
     if (!existing) {
-      if (normalizedStatus === 'pending' && !allowInsert) {
+      if (!allowInsert) {
         return null;
       }
       return insertSeenTaskWithExecutor(executor, task, {
@@ -792,15 +808,16 @@ export async function createPostgresHomeworkDatabase({
           );
         }
         for (const update of normalizedStatusUpdates) {
-          if (update.status !== 'pending' || snapshotComplete === false) {
+          if (update.status !== 'pending' || snapshotComplete === false
+            || !isTaskInAccountingPeriod(update.task)) {
             continue;
           }
           const restored = await client.query(
             'DELETE FROM classroom_task_tombstones WHERE external_id = $1 RETURNING external_id',
             [externalId(update.task)],
           );
-          // This id was known before retention, so an old reopened task is
-          // eligible even when its updatedAt is outside the new-import cutoff.
+          // Previously known work can return only after passing the publication
+          // policy above; retention must never bypass the accounting period.
           if (restored.rows.length > 0) {
             update.allowInsert = true;
           }
@@ -907,7 +924,7 @@ export async function createPostgresHomeworkDatabase({
 
   async function completeTask(id, timestamp = new Date().toISOString()) {
     const task = await findById(id);
-    if (!task) {
+    if (!task || !isTaskInAccountingPeriod(task)) {
       return null;
     }
     const now = normalizeTimestampForStorage(timestamp, 'completed_at');
@@ -931,7 +948,7 @@ export async function createPostgresHomeworkDatabase({
 
   async function uncompleteTask(id, timestamp = new Date().toISOString()) {
     const task = await findById(id);
-    if (!task || task.status !== 'completed') {
+    if (!task || task.status !== 'completed' || !isTaskInAccountingPeriod(task)) {
       return null;
     }
     const now = normalizeTimestampForStorage(timestamp, 'updated_at');

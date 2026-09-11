@@ -26,6 +26,7 @@ function task({
     subject: 'Алгебра',
     description,
     targetDate: '2026-09-11',
+    publishedAt: '2026-09-09T10:00:00Z',
   });
 }
 

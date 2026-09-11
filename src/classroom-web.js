@@ -1353,6 +1353,7 @@ function normalizeCourseWorkObject(object, courseId, isCourseWorkContext) {
     description: normalizeDescription(description),
     dueAt,
     updatedAt,
+    publishedAt: normalizeTimestamp(object.publishedAt ?? object.publishTime),
     attachments,
     ...(hasValue(explicitUrl) ? { url: String(explicitUrl) } : {}),
   };
@@ -1400,6 +1401,11 @@ function normalizeCourseWorkArray(record, courseId) {
     description: normalizeDescription(description),
     dueAt: normalizeTimestamp(dueMetadata?.[4]),
     updatedAt: normalizeTimestamp(record[2]),
+    // Published-state metadata: field 3 is the actual posting timestamp;
+    // field 5 is the scheduled time, and base timestamps include edits.
+    publishedAt: dueMetadata?.[0] === 2
+      ? normalizeTimestamp(dueMetadata[2])
+      : null,
     // The current list response exposes material-shaped arrays but does not
     // identify their fields reliably enough to turn them into links here.
     attachments: [],
@@ -1444,6 +1450,23 @@ function collectCourseWorkObjects(value, courseId, debug = false) {
     seen.add(node);
 
     if (Array.isArray(node)) {
+      // The assignment envelope carries its due timestamp beside the base
+      // record, not inside it. Read it before recursive extraction/deduplication
+      // discards that context. Type 2 is the verified assignment variant.
+      if (node[0] === 'hrsi.qr' && Array.isArray(node[2])) {
+        node[2].forEach((item, index) => {
+          if (item?.[0] !== 2 || !Array.isArray(item[1]?.[1])) {
+            return;
+          }
+          const record = item[1][0];
+          const candidate = normalizeCourseWorkArray(record, courseId);
+          if (candidate) {
+            candidate.dueAt = normalizeTimestamp(item[1][1][0]);
+            addCandidate(candidate, record, [...path, 2, index, 1, 0]);
+            seen.add(record);
+          }
+        });
+      }
       const arrayCandidate = normalizeCourseWorkArray(node, courseId);
       if (arrayCandidate) {
         addCandidate(arrayCandidate, node, path);

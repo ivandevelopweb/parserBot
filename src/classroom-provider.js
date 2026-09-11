@@ -17,11 +17,12 @@ import {
   normalizeDescription,
 } from './utils.js';
 import { buildClassroomAssignmentUrl } from './classroom-url.js';
+import { CLASSROOM_IMPORT_CUTOFF, isClassroomPublicationEligible } from './classroom-policy.js';
 
 export { buildClassroomAssignmentUrl } from './classroom-url.js';
 
 export const CLASSROOM_IMPORT_TIME_ZONE = 'Europe/Kyiv';
-export const CLASSROOM_IMPORT_CUTOFF = '2026-09-01T00:00:00+03:00';
+export { CLASSROOM_IMPORT_CUTOFF } from './classroom-policy.js';
 export const CLASSROOM_STATUS_PENDING = 'pending';
 export const CLASSROOM_STATUS_COMPLETED = 'completed';
 export const CLASSROOM_STATUS_UNKNOWN = 'unknown';
@@ -60,6 +61,7 @@ const CLASSROOM_OBSERVATION_FIELDS = [
   'startTime',
   'url',
   'filesCount',
+  'publishedAt',
 ];
 
 function isMissingObservationValue(field, value) {
@@ -91,11 +93,7 @@ export function isClassroomAssignmentAfterCutoff(
   assignment,
   { cutoff = CLASSROOM_IMPORT_CUTOFF } = {},
 ) {
-  const updatedAt = timestampMilliseconds(assignment?.updatedAt);
-  const cutoffMilliseconds = timestampMilliseconds(cutoff);
-  return Number.isFinite(updatedAt)
-    && Number.isFinite(cutoffMilliseconds)
-    && updatedAt >= cutoffMilliseconds;
+  return isClassroomPublicationEligible(assignment, { cutoff });
 }
 
 function formatDueAtInKyiv(dueAt) {
@@ -177,6 +175,7 @@ export function normalizeClassroomWebAssignment(course, assignment, { classroomS
     url: explicitUrl || buildClassroomAssignmentUrl(courseId, assignmentId),
     filesCount: attachments.length,
     updatedAt: assignment.updatedAt ?? null,
+    publishedAt: assignment.publishedAt ?? null,
   });
   return classroomStatus
     ? { ...task, classroomStatus }
@@ -326,7 +325,7 @@ export async function getClassroomWebHomeworks(
       '[classroom-web] Courses: ' + courses.length
         + ', coursework fetched: ' + fetchedAssignments
         + ', imported: ' + tasks.length
-        + ', ignored by updatedAt cutoff: ' + ignoredAssignments,
+        + ', ignored by publication cutoff: ' + ignoredAssignments,
     );
     return attachClassroomSyncMetadata(tasks, {
       statusSyncEnabled: false,
@@ -386,7 +385,9 @@ export async function getClassroomWebHomeworks(
   const statusUpdates = [];
   const currentExternalIds = [];
   for (const [externalId, observation] of observations) {
-    currentExternalIds.push(externalId);
+    if (isClassroomAssignmentAfterCutoff(observation.task.snapshot, { cutoff })) {
+      currentExternalIds.push(externalId);
+    }
     // A positive turned-in/completed observation wins over a not-turned-in
     // slice. The Classroom response sets are overlapping provider views, so
     // letting pending win here can reopen a task after the user submitted it.
@@ -403,8 +404,7 @@ export async function getClassroomWebHomeworks(
     statusUpdates.push({
       task: statusTask,
       status,
-      allowInsert: status === CLASSROOM_STATUS_COMPLETED
-        || isClassroomAssignmentAfterCutoff(observation.task.snapshot, { cutoff }),
+      allowInsert: isClassroomAssignmentAfterCutoff(observation.task.snapshot, { cutoff }),
     });
 
     if (isClassroomAssignmentAfterCutoff(observation.task.snapshot, { cutoff })) {
@@ -421,7 +421,7 @@ export async function getClassroomWebHomeworks(
     '[classroom-web] Courses: ' + courses.length
       + ', coursework fetched: ' + fetchedAssignments
       + ', imported: ' + tasks.length
-      + ', ignored by updatedAt cutoff: ' + ignoredAssignments,
+      + ', ignored by publication cutoff: ' + ignoredAssignments,
   );
   return attachClassroomSyncMetadata(tasks, {
     statusUpdates,
