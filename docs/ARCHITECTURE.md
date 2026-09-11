@@ -233,6 +233,15 @@ It converts `dueAt` to a `targetDate` and `targetTime` in
 
 ### Telegram Bot API
 
+Production new/changed notifications use HTML for both sources. E-school
+notification text links to the existing diary homework URL derived from the
+stored homework id and ends with `(Єдина школа)`. All display fields are escaped;
+compact messages truncate before escaping and retain complete link tags within
+the Telegram limit. The generic legacy JSON formatter keeps its plain-text
+E-school default; only the production notification wrappers opt into HTML.
+Classroom formatting, task identities, snapshots and delivery acknowledgement
+rules are unchanged. Formatting alone does not enqueue old tasks again.
+
 `src/telegram.js` calls these regular Bot API methods:
 
 - `getMe`;

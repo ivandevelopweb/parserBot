@@ -186,9 +186,11 @@ function formatLesson(snapshot, { escape = false } = {}) {
 function buildHomeworkMessage(task, type = 'new', {
   title,
   classroomAuthuserIndex = null,
+  html = false,
 } = {}) {
   const snapshot = getSnapshot(task);
   const source = getSource(task);
+  const useHtml = html || source === 'classroom';
   const resolvedTitle = title ?? (type === 'changed'
     ? '✏️ Домашнє завдання змінено'
     : '📚 Нове домашнє завдання');
@@ -202,17 +204,17 @@ function buildHomeworkMessage(task, type = 'new', {
   const lesson = formatLesson({
     ...snapshot,
     startTime: snapshot.targetTime || snapshot.startTime,
-  }, { escape: source === 'classroom' });
+  }, { escape: useHtml });
   const filesCount = Number(snapshot.filesCount);
-  const displaySubject = source === 'classroom' ? escapeHtml(subject) : subject;
+  const displaySubject = useHtml ? escapeHtml(subject) : subject;
 
   if (subject) {
     sections.push(displaySubject);
   }
   if (description) {
-    if (source === 'classroom') {
+    if (useHtml) {
       sections.push(`📝 ${formatLinkedHomeworkTitle(task, { classroomAuthuserIndex })}`);
-      if (homeworkTitle && homeworkTitle !== description) {
+      if (source === 'classroom' && homeworkTitle && homeworkTitle !== description) {
         sections.push(`📄 ${escapeHtml(description)}`);
       }
     } else {
@@ -223,11 +225,11 @@ function buildHomeworkMessage(task, type = 'new', {
   }
   if (topics.length > 0) {
     sections.push(`📖 Теми:\n${topics.map((topic) => (
-      `• ${source === 'classroom' ? escapeHtml(topic) : topic}`
+      `• ${useHtml ? escapeHtml(topic) : topic}`
     )).join('\n')}`);
   }
   if (targetDate) {
-    sections.push(`📅 На: ${source === 'classroom'
+    sections.push(`📅 На: ${useHtml
       ? escapeHtml(displayTargetDate)
       : displayTargetDate}`);
   } else if (source === 'classroom') {
@@ -245,12 +247,24 @@ function buildHomeworkMessage(task, type = 'new', {
 
 const COMPACT_NOTIFICATION_MARKER = 'ℹ️ Повідомлення скорочено; повний текст збережено.';
 
+function linkCompactEschoolText(task, escapedText) {
+  const url = getShortestHomeworkWebUrl(task);
+  const escapedUrl = escapeHtml(url);
+  const label = `${escapedText} (Єдина школа)`;
+  // Keep room for the remaining compact fields and complete HTML tags.
+  return url && escapedUrl.length <= 700
+    ? `<a href="${escapedUrl}">${label}</a>`
+    : label;
+}
+
 function buildCompactHomeworkMessage(task, type = 'new', {
   title,
   classroomAuthuserIndex = null,
+  html = false,
 } = {}) {
   const snapshot = getSnapshot(task);
   const source = getSource(task);
+  const useHtml = html || source === 'classroom';
   const resolvedTitle = title ?? (type === 'changed'
     ? '✏️ Завдання змінено'
     : '📚 Нове завдання');
@@ -262,29 +276,30 @@ function buildCompactHomeworkMessage(task, type = 'new', {
   const lesson = formatLesson({
     ...snapshot,
     startTime: snapshot.targetTime || snapshot.startTime,
-  }, { escape: source === 'classroom' });
+  }, { escape: useHtml });
   const filesCount = Number(snapshot.filesCount);
 
   if (subject) {
-    sections.push(source === 'classroom'
+    sections.push(useHtml
       ? truncateEscapedHtmlTextToLength(subject, 500)
       : truncatePlainTextToLength(subject, 500));
   }
   if (description) {
-    sections.push(`📝 ${source === 'classroom'
+    const text = useHtml
       ? truncateEscapedHtmlTextToLength(description, 1500)
-      : truncatePlainTextToLength(description, 1500)}`);
+      : truncatePlainTextToLength(description, 1500);
+    sections.push(`📝 ${html && source === 'eschool' ? linkCompactEschoolText(task, text) : text}`);
   }
 
   const topics = getTopics(task);
   if (topics.length > 0) {
     const topicText = topics.map((topic) => `• ${topic}`).join('\n');
-    sections.push(`📖 Теми:\n${source === 'classroom'
+    sections.push(`📖 Теми:\n${useHtml
       ? truncateEscapedHtmlTextToLength(topicText, 1000)
       : truncatePlainTextToLength(topicText, 1000)}`);
   }
   if (targetDate) {
-    sections.push(`📅 На: ${source === 'classroom'
+    sections.push(`📅 На: ${useHtml
       ? escapeHtml(displayTargetDate)
       : displayTargetDate}`);
   } else if (source === 'classroom') {
@@ -299,8 +314,8 @@ function buildCompactHomeworkMessage(task, type = 'new', {
 
   const compact = sections.join('\n\n');
   const url = getShortestHomeworkWebUrl(task, { classroomAuthuserIndex });
-  if (url) {
-    const link = source === 'classroom'
+  if (url && !(html && source === 'eschool')) {
+    const link = useHtml
       ? `<a href="${escapeHtml(url)}">Відкрити повне завдання</a>`
       : `🔗 ${url}`;
     const withLink = `${compact}\n\n${link}`;
@@ -315,17 +330,19 @@ function buildCompactHomeworkMessage(task, type = 'new', {
 
   // The field budgets above are intentionally conservative, but keep a final
   // plain/HTML-safe fallback if a future fixed section grows unexpectedly.
-  const fallbackSubject = source === 'classroom'
+  const fallbackSubject = useHtml
     ? truncateEscapedHtmlTextToLength(subject, 250)
     : truncatePlainTextToLength(subject, 250);
-  const fallbackDescription = source === 'classroom'
+  const fallbackDescription = useHtml
     ? truncateEscapedHtmlTextToLength(description, 800)
     : truncatePlainTextToLength(description, 800);
   return [
     resolvedTitle,
     COMPACT_NOTIFICATION_MARKER,
     fallbackSubject,
-    fallbackDescription ? `📝 ${fallbackDescription}` : null,
+    fallbackDescription ? `📝 ${html && source === 'eschool'
+      ? linkCompactEschoolText(task, fallbackDescription)
+      : fallbackDescription}` : null,
   ].filter(Boolean).join('\n\n');
 }
 
@@ -340,6 +357,7 @@ export function formatHomeworkMessage(task, type = 'new', options = {}) {
 export function formatNewHomeworkMessage(task, options = {}) {
   return formatHomeworkMessage(task, 'new', {
     ...options,
+    html: true,
     title: '📚 Нове завдання',
   });
 }
@@ -347,6 +365,7 @@ export function formatNewHomeworkMessage(task, options = {}) {
 export function formatChangedHomeworkMessage(task, options = {}) {
   return formatHomeworkMessage(task, 'changed', {
     ...options,
+    html: true,
     title: '✏️ Завдання змінено',
   });
 }

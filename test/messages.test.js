@@ -1,8 +1,50 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { formatHomeworkList, formatHomeworkMessage } from '../src/messages.js';
+import { formatHomeworkList, formatHomeworkMessage, formatNewHomeworkMessage, formatChangedHomeworkMessage } from '../src/messages.js';
 import { MAX_TELEGRAM_MESSAGE_LENGTH } from '../src/telegram.js';
+
+test('E-school new and changed notifications link escaped assignment text and source label', () => {
+  const task = {
+    homeworkIds: [101166],
+    snapshot: {
+      subject: 'English <&>', description: 'WB <1> & "2"',
+      topics: ['Topic <&>'], lessonNumber: '<1>', startTime: '10:00 & <x>',
+      targetDate: '2026-09-11', url: 'javascript:alert(1)',
+    },
+  };
+  for (const format of [formatNewHomeworkMessage, formatChangedHomeworkMessage]) {
+    const message = format(task);
+    assert.match(message, /<a href="https:\/\/diary\.eschool-ua\.com\/homework\/101166">WB &lt;1&gt; &amp; &quot;2&quot; \(Єдина школа\)<\/a>/);
+    assert.match(message, /English &lt;&amp;&gt;/);
+    assert.match(message, /Topic &lt;&amp;&gt;/);
+    assert.match(message, /Урок &lt;1&gt;/);
+    assert.doesNotMatch(message, /javascript:|<x>/);
+    const noLink = format({ snapshot: task.snapshot });
+    assert.doesNotMatch(noLink, /<a\b/);
+    assert.match(noLink, /\(Єдина школа\)/);
+  }
+});
+
+test('long E-school notifications retain a complete link and source label within the limit', () => {
+  for (const format of [formatNewHomeworkMessage, formatChangedHomeworkMessage]) {
+    const message = format({
+      homeworkIds: [101166],
+      snapshot: {
+        subject: '&<>😀'.repeat(1500), description: '&<>😀'.repeat(1500),
+        topics: ['&<>😀'.repeat(1500)], startTime: '10:00',
+        url: `https://diary.eschool-ua.com/homework/101166?q=${'x'.repeat(5000)}`,
+      },
+    });
+    assert.ok(message.length <= MAX_TELEGRAM_MESSAGE_LENGTH);
+    assert.match(message, /скорочено/);
+    assert.match(message, /<a href="https:\/\/diary\.eschool-ua\.com\/homework\/101166">/);
+    assert.match(message, /\(Єдина школа\)<\/a>/);
+    assert.equal((message.match(/<a\b/g) ?? []).length, 1);
+    assert.equal((message.match(/<\/a>/g) ?? []).length, 1);
+    assert.doesNotMatch(message.replace(/<a\b[^>]*>|<\/a>/g, ''), /[<>]/);
+  }
+});
 
 test('formatHomeworkMessage builds the requested Ukrainian notification', () => {
   const message = formatHomeworkMessage({

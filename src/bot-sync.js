@@ -294,10 +294,6 @@ async function removeExpiredCompletedTasks(database, timestamp, logger) {
   return removedCompletedTasks;
 }
 
-function isClassroomTask(task) {
-  return String(task?.source ?? task?.snapshot?.source ?? ESCHOOL_SOURCE) === CLASSROOM_SOURCE;
-}
-
 function classifyNotification(previous, task, source) {
   if (!previous) {
     if (source === CLASSROOM_SOURCE && task.classroomStatus === 'completed') {
@@ -359,10 +355,8 @@ async function deliverPendingNotifications({
       task: currentTask,
       kind,
       signal,
+      parseMode: 'HTML',
     };
-    if (isClassroomTask(currentTask)) {
-      sendOptions.parseMode = 'HTML';
-    }
 
     try {
       await sendMessageFn(message, sendOptions);

@@ -199,6 +199,12 @@ Completed tasks use `❌`, which returns a task to the pending state while
 keeping the completed list open. The menu also has `ℹ️ Довідка` with the
 command list; the help screen shows `↩️ До меню` to return to the main menu.
 
+New and changed E-school notifications also link the assignment text directly
+to its diary homework page, ending with `(Єдина школа)`. The message is sent as
+escaped Telegram HTML. Compact notifications keep the linked shortened text
+and source label when a usable URL fits; missing/unsafe URLs fall back to text.
+Previously delivered messages are not rewritten by this formatting change.
+
 The bot UI state, Classroom account-order preference, compact snapshots, Telegram
 offset, and pending notification queue are stored in PostgreSQL. Pending tasks are not removed by age. Completed
 tasks are removed after 14 days from `completedAt` during a later sync. A
