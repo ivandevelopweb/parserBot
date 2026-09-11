@@ -21,3 +21,5 @@ services:
         sync: false
       - key: HOMEWORK_DATABASE_URL
         sync: false
+      - key: HOMEWORK_SYNC_INTERVAL_MINUTES
+        value: "20"

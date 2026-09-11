@@ -1,7 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createTelegramBot } from '../src/telegram-bot.js';
+import {
+  createTelegramBot,
+  getSyncStaleAfterMs,
+  parseHomeworkSyncIntervalMinutes,
+} from '../src/telegram-bot.js';
 import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
@@ -23,6 +27,44 @@ function createTelegramMock() {
     },
   };
 }
+
+test('sync interval configuration is bounded and diagnostics are kept in memory', async () => {
+  assert.equal(parseHomeworkSyncIntervalMinutes(undefined), 10);
+  assert.equal(parseHomeworkSyncIntervalMinutes('20'), 20);
+  assert.throws(() => parseHomeworkSyncIntervalMinutes('4'), /from 5 to 60/);
+  assert.throws(() => parseHomeworkSyncIntervalMinutes('10.5'), /integer/);
+  assert.equal(getSyncStaleAfterMs(20 * 60 * 1000), 45 * 60 * 1000);
+
+  let databaseReads = 0;
+  const bot = createTelegramBot({
+    auth: {},
+    telegram: createTelegramMock(),
+    database: {
+      async getMeta() {
+        databaseReads += 1;
+        throw new Error('health must not query the database');
+      },
+    },
+    allowedChatId: '123',
+    syncFn: async () => ({
+      providers: [
+        {
+          source: 'eschool',
+          status: 'ok',
+          attemptedAt: new Date().toISOString(),
+          lastSuccessAt: new Date().toISOString(),
+          taskCount: 2,
+          metrics: { observed: 2 },
+        },
+      ],
+    }),
+    logger: () => {},
+  });
+  await bot.runSync();
+  assert.equal(databaseReads, 0);
+  assert.equal(bot.getDiagnostics().eschool.status, 'ok');
+  assert.equal(bot.getDiagnostics().eschool.stale, false);
+});
 
 async function createBotContext() {
   const { database } = await createTestDatabase();

@@ -60,6 +60,33 @@ test('PostgreSQL adapter initializes schema and preserves task lifecycle', async
   }
 });
 
+test('PostgreSQL baseline can persist Classroom status observations in one write path', async () => {
+  const { pool } = createPool();
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+  });
+  const timestamp = '2026-09-09T12:00:00.000Z';
+  const completed = task({
+    source: 'classroom',
+    externalId: 'course-1:work-1',
+  });
+
+  try {
+    await database.saveBaseline([completed], timestamp, {
+      source: 'classroom',
+      statusUpdates: [{ task: completed, status: 'completed' }],
+    });
+    const stored = await database.findByExternalId(completed.externalId, 'classroom');
+    assert.equal(stored.status, 'completed');
+    assert.equal(stored.completionOrigin, 'classroom');
+    assert.equal(stored.isCurrent, false);
+    assert.equal(stored.completedAt, timestamp);
+  } finally {
+    await database.close();
+  }
+});
+
 test('the public homework database factory is PostgreSQL-only', async () => {
   const { pool } = createPool();
   const database = await createHomeworkDatabase({

@@ -969,6 +969,16 @@ test('coursework decoder rejects malformed and partially unknown stream-item col
   }
 });
 
+test('coursework decoder rejects partially recognized hrq.cus collections', () => {
+  const record = courseWorkArrayRecord('work-1', 'course-1', 'Assignment');
+  const decoded = decodeCourseWorkPayload([
+    'hrq.cus',
+    [true],
+    [record, { unexpected: true }],
+  ], { courseId: 'course-1', includeMetadata: true });
+  assert.equal(decoded.recognized, false);
+});
+
 test('coursework fetch follows live stream-item pages and accepts the terminal empty response', async () => {
   const calls = [];
   const client = {

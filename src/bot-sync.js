@@ -11,7 +11,10 @@ import {
   parseClassroomAuthuserIndex,
 } from './classroom-url.js';
 import { SmokeTestError, errorMessage, normalizeDescription, normalizeTopic } from './utils.js';
-import { CLASSROOM_STATUS_RECONCILED_META_KEY } from './homework-db-shared.js';
+import {
+  CLASSROOM_STATUS_RECONCILED_META_KEY,
+  taskIdentity,
+} from './homework-db-shared.js';
 import { isTaskInAccountingPeriod } from './classroom-policy.js';
 
 export const COMPLETED_TASK_RETENTION_MS = 14 * 24 * 60 * 60 * 1000;
@@ -20,6 +23,7 @@ export const CLASSROOM_SOURCE = 'classroom';
 
 const loggedInEschoolClients = new WeakSet();
 export const ESCHOOL_SYNC_META_KEY = 'eschool_sync_status';
+export const CLASSROOM_SYNC_META_KEY = 'classroom_sync_status';
 
 async function syncEschool({ auth, getAppointmentsFn, database, logger, now, signal, ...options }) {
   const attemptedAt = new Date(now).toISOString();
@@ -71,6 +75,12 @@ async function syncEschool({ auth, getAppointmentsFn, database, logger, now, sig
       });
       logger(`[eschool] Sync failed at stage: ${stage}; last success: ${previous?.lastSuccessAt ?? 'unknown'}`);
     }
+    try {
+      error.syncStage = stage;
+    } catch {
+      // Some external error objects may be immutable; the persisted status is
+      // still sufficient for the next operator inspection.
+    }
     throw error;
   }
 }
@@ -111,10 +121,23 @@ function getTasksFromProviderResult(result, source) {
   }
 
   const normalizedTasks = tasks.map((task) => {
-    if (task?.snapshot && task?.fingerprint) {
-      return task;
+    if (!task || typeof task !== 'object') {
+      throw new SmokeTestError(
+        `${source} provider returned an invalid homework task`,
+        { code: 'SYNC_DATA_ERROR' },
+      );
     }
-    return toSyncTask({ ...task, source });
+    const normalized = task?.snapshot && task?.fingerprint
+      ? task
+      : toSyncTask({ ...task, source });
+    if (source === ESCHOOL_SOURCE
+      && String(normalized.targetAppointmentId ?? '').trim() === '') {
+      throw new SmokeTestError(
+        'E-school provider returned a homework without targetAppointmentId',
+        { code: 'SYNC_DATA_ERROR' },
+      );
+    }
+    return normalized;
   });
 
   const seenIdentities = new Set();
@@ -132,6 +155,12 @@ function getTasksFromProviderResult(result, source) {
 }
 
 function getProviderSnapshot(result, source) {
+  if (source === ESCHOOL_SOURCE && result?.snapshotComplete === false) {
+    throw new SmokeTestError(
+      'E-school provider returned an incomplete snapshot',
+      { code: 'SYNC_DATA_ERROR' },
+    );
+  }
   const rawTasks = getTasksFromProviderResult(result, source);
   const metadata = result;
   const statusSyncEnabled = source === CLASSROOM_SOURCE
@@ -202,10 +231,16 @@ function snapshotComparable(snapshot, { includeUpdatedAt = true, source = null }
   const rawUrl = String(snapshot?.url ?? snapshot?.alternateLink ?? snapshot?.homeworkUrl ?? '');
   const value = {
     source: snapshotSource,
+    subject: normalizeDescription(snapshot?.subject),
     title: normalizeDescription(snapshot?.title ?? snapshot?.description),
     description: normalizeDescription(snapshot?.description),
+    assignedDate: String(snapshot?.assignedDate ?? ''),
     targetDate: String(snapshot?.targetDate ?? ''),
     targetTime: String(snapshot?.targetTime ?? ''),
+    lessonNumber: snapshot?.lessonNumber === null || snapshot?.lessonNumber === undefined
+      ? null
+      : String(snapshot.lessonNumber),
+    startTime: String(snapshot?.startTime ?? ''),
     topics: Array.isArray(snapshot?.topics) ? snapshot.topics.map(normalizeTopic) : [],
     // The direct Classroom route is derived from stable ids. Comparing its
     // old raw-id form with the corrected encoded form would create a false
@@ -256,6 +291,7 @@ async function initializeDatabase({
   legacyStateStore,
   source,
   currentTasks,
+  statusUpdates = [],
   timestamp,
   logger,
 }) {
@@ -276,9 +312,20 @@ async function initializeDatabase({
     }
   }
 
-  await database.saveBaseline(currentTasks, timestamp, { source });
+  const baselineResult = await database.saveBaseline(currentTasks, timestamp, {
+    source,
+    statusUpdates,
+  });
   logger(`[bot-sync] Baseline initialized for ${source} with ${currentTasks.length} tasks`);
-  return { imported: false, initialized: true };
+  return {
+    imported: false,
+    initialized: true,
+    statusAppliedIdentities: baselineResult?.statusAppliedIdentities ?? [],
+    metrics: baselineResult ?? {
+      inserted: currentTasks.length,
+      unchanged: 0,
+    },
+  };
 }
 
 async function removeExpiredCompletedTasks(database, timestamp, logger) {
@@ -408,6 +455,7 @@ export async function syncProviderHomeworks({
     throw new SmokeTestError('syncProviderHomeworks requires a Telegram sendMessage function');
   }
 
+  const startedAt = Date.now();
   const timestamp = new Date(now).toISOString();
   let currentTasks;
   let providerSnapshot;
@@ -437,19 +485,51 @@ export async function syncProviderHomeworks({
     legacyStateStore,
     source,
     currentTasks,
+    statusUpdates: providerSnapshot.statusUpdates,
     timestamp,
     logger,
   });
 
   if (initialization.initialized && !initialization.imported) {
+    let reconciliation = null;
     if (providerSnapshot.statusSyncEnabled) {
-      await database.applyProviderSnapshot([], timestamp, {
+      const statusAppliedIdentities = new Set(initialization.statusAppliedIdentities ?? []);
+      reconciliation = await database.applyProviderSnapshot([], timestamp, {
         source,
-        statusUpdates: providerSnapshot.statusUpdates,
+        statusUpdates: providerSnapshot.statusUpdates.filter(({ task }) => (
+          !statusAppliedIdentities.has(taskIdentity(task))
+        )),
         currentExternalIds: providerSnapshot.currentExternalIds,
         snapshotComplete: providerSnapshot.snapshotComplete,
         statusReconciliationComplete: true,
       });
+    }
+    const baselineMetrics = initialization.metrics ?? {};
+    const reconciliationMetrics = reconciliation ?? {};
+    const metrics = {
+      observed: currentTasks.length,
+      inserted: Number(baselineMetrics.inserted ?? currentTasks.length)
+        + Number(reconciliationMetrics.inserted ?? 0),
+      changed: 0,
+      unchanged: Number(baselineMetrics.unchanged ?? 0),
+      notCurrent: Number(reconciliationMetrics.notCurrent ?? 0),
+      statusTransitions: Number(reconciliationMetrics.statusTransitions ?? 0),
+      notificationsQueued: Number(reconciliationMetrics.notificationsQueued ?? 0),
+      notificationsSent: 0,
+      durationMs: Date.now() - startedAt,
+    };
+    if (source === CLASSROOM_SOURCE && typeof database.setMeta === 'function') {
+      try {
+        await database.setMeta(CLASSROOM_SYNC_META_KEY, JSON.stringify({
+          attemptedAt: timestamp,
+          lastSuccessAt: timestamp,
+          taskCount: currentTasks.length,
+          status: 'ok',
+          metrics,
+        }));
+      } catch {
+        logger('[classroom] Could not persist sync diagnostics');
+      }
     }
     return {
       source,
@@ -460,18 +540,41 @@ export async function syncProviderHomeworks({
       sentTasks: 0,
       taskCount: currentTasks.length,
       statusReconciled: providerSnapshot.statusSyncEnabled,
+      attemptedAt: timestamp,
+      lastSuccessAt: timestamp,
+      metrics,
     };
   }
 
-  const matchedTasks = typeof database.findMatches === 'function'
-    ? await database.findMatches(currentTasks)
-    : await Promise.all(currentTasks.map(async (task) => ({
+  const matchCandidates = [
+    ...currentTasks,
+    ...(providerSnapshot.statusSyncEnabled
+      ? providerSnapshot.statusUpdates.map(({ task }) => task)
+      : []),
+  ];
+  const allMatches = typeof database.findMatches === 'function'
+    ? await database.findMatches(matchCandidates)
+    : await Promise.all(matchCandidates.map(async (task) => ({
       task,
       previous: await database.findMatch(task),
     })));
+  const previousByIdentity = new Map(
+    allMatches.map(({ task, previous }) => [taskIdentity(task), previous]),
+  );
+  const matchedTasks = currentTasks.map((task) => ({
+    task,
+    previous: previousByIdentity.get(taskIdentity(task)) ?? null,
+  }));
+  const statusUpdates = providerSnapshot.statusUpdates.map((update) => ({
+    ...update,
+    previous: previousByIdentity.get(taskIdentity(update.task)) ?? null,
+  }));
   const notificationPlan = [];
-  const statusReconciliationPending = providerSnapshot.statusSyncEnabled
-    && !(await database.getMeta(CLASSROOM_STATUS_RECONCILED_META_KEY));
+  const statusMarker = providerSnapshot.statusSyncEnabled
+    ? await database.getMeta(CLASSROOM_STATUS_RECONCILED_META_KEY)
+    : null;
+  const statusReconciliationPending = providerSnapshot.statusSyncEnabled && !statusMarker;
+  let persistence = null;
   let newTasks = 0;
   let updatedTasks = 0;
   for (const { task, previous } of matchedTasks) {
@@ -479,7 +582,7 @@ export async function syncProviderHomeworks({
     // The first Classroom status pass is a migration of observations, not a
     // notification event. Existing queue flags remain untouched for pending
     // work, while a completed status update can clear a stale flag atomically.
-    const kind = statusReconciliationPending ? null : normalKind;
+    const kind = initialization.imported || statusReconciliationPending ? null : normalKind;
     if (kind === 'changed') {
       updatedTasks += 1;
     } else if (kind === 'new') {
@@ -489,9 +592,9 @@ export async function syncProviderHomeworks({
   }
 
   if (typeof database.applyProviderSnapshot === 'function') {
-    await database.applyProviderSnapshot(notificationPlan, timestamp, {
+    persistence = await database.applyProviderSnapshot(notificationPlan, timestamp, {
       source,
-      statusUpdates: providerSnapshot.statusUpdates,
+      statusUpdates,
       currentExternalIds: providerSnapshot.currentExternalIds,
       snapshotComplete: providerSnapshot.snapshotComplete,
       statusReconciliationComplete: providerSnapshot.statusSyncEnabled
@@ -518,10 +621,39 @@ export async function syncProviderHomeworks({
     signal,
   });
 
+  const persistenceMetrics = persistence ?? {};
+  const metrics = {
+    observed: currentTasks.length,
+    inserted: Number(persistenceMetrics.inserted ?? newTasks),
+    changed: Number(persistenceMetrics.changed ?? updatedTasks),
+    unchanged: Number(persistenceMetrics.unchanged ?? Math.max(
+      0,
+      currentTasks.length - newTasks - updatedTasks,
+    )),
+    notCurrent: Number(persistenceMetrics.notCurrent ?? 0),
+    statusTransitions: Number(persistenceMetrics.statusTransitions ?? 0),
+    notificationsQueued: Number(persistenceMetrics.notificationsQueued ?? 0),
+    notificationsSent: delivery.sentTasks,
+    durationMs: Date.now() - startedAt,
+  };
+  if (source === CLASSROOM_SOURCE && typeof database.setMeta === 'function') {
+    try {
+      await database.setMeta(CLASSROOM_SYNC_META_KEY, JSON.stringify({
+        attemptedAt: timestamp,
+        lastSuccessAt: timestamp,
+        taskCount: currentTasks.length,
+        status: delivery.deliveryErrors ? 'delivery_error' : 'ok',
+        metrics,
+      }));
+    } catch {
+      logger('[classroom] Could not persist sync diagnostics');
+    }
+  }
+
   logger(`[bot-sync] ${source} — New: ${newTasks}, changed: ${updatedTasks}, sent: ${delivery.sentTasks}`);
   return {
     source,
-    status: 'ok',
+    status: delivery.deliveryErrors ? 'delivery_error' : 'ok',
     baselineInitialized: false,
     newTasks,
     updatedTasks,
@@ -529,7 +661,10 @@ export async function syncProviderHomeworks({
     deliveryErrors: delivery.deliveryErrors,
     taskCount: currentTasks.length,
     statusReconciled: providerSnapshot.statusSyncEnabled
-      && Boolean(await database.getMeta(CLASSROOM_STATUS_RECONCILED_META_KEY)),
+      && Boolean(statusMarker || statusReconciliationPending),
+    attemptedAt: timestamp,
+    lastSuccessAt: timestamp,
+    metrics,
   };
 }
 
@@ -614,10 +749,23 @@ export async function syncAllHomeworks({
       source: ESCHOOL_SOURCE,
       status: 'error',
       error: errorMessage(error),
+      stage: error.syncStage ?? 'unknown',
+      attemptedAt: new Date(now).toISOString(),
       newTasks: 0,
       updatedTasks: 0,
       sentTasks: 0,
       taskCount: null,
+      metrics: {
+        observed: 0,
+        inserted: 0,
+        changed: 0,
+        unchanged: 0,
+        notCurrent: 0,
+        statusTransitions: 0,
+        notificationsQueued: 0,
+        notificationsSent: 0,
+        durationMs: 0,
+      },
     });
   }
 
@@ -628,10 +776,22 @@ export async function syncAllHomeworks({
     providers.push({
       source: CLASSROOM_SOURCE,
       status: 'skipped',
+      attemptedAt: new Date(now).toISOString(),
       newTasks: 0,
       updatedTasks: 0,
       sentTasks: 0,
       taskCount: 0,
+      metrics: {
+        observed: 0,
+        inserted: 0,
+        changed: 0,
+        unchanged: 0,
+        notCurrent: 0,
+        statusTransitions: 0,
+        notificationsQueued: 0,
+        notificationsSent: 0,
+        durationMs: 0,
+      },
     });
   } else {
     try {
@@ -653,10 +813,22 @@ export async function syncAllHomeworks({
         source: CLASSROOM_SOURCE,
         status: 'error',
         error: errorMessage(error),
+        attemptedAt: new Date(now).toISOString(),
         newTasks: 0,
         updatedTasks: 0,
         sentTasks: 0,
         taskCount: null,
+        metrics: {
+          observed: 0,
+          inserted: 0,
+          changed: 0,
+          unchanged: 0,
+          notCurrent: 0,
+          statusTransitions: 0,
+          notificationsQueued: 0,
+          notificationsSent: 0,
+          durationMs: 0,
+        },
       });
     }
   }
@@ -674,6 +846,33 @@ export async function syncAllHomeworks({
     ),
     providers,
     failedProviders,
+    metrics: providers.reduce((total, provider) => {
+      const metrics = provider.metrics ?? {};
+      for (const key of [
+        'observed',
+        'inserted',
+        'changed',
+        'unchanged',
+        'notCurrent',
+        'statusTransitions',
+        'notificationsQueued',
+        'notificationsSent',
+      ]) {
+        total[key] += Number(metrics[key] ?? 0);
+      }
+      total.durationMs += Number(metrics.durationMs ?? 0);
+      return total;
+    }, {
+      observed: 0,
+      inserted: 0,
+      changed: 0,
+      unchanged: 0,
+      notCurrent: 0,
+      statusTransitions: 0,
+      notificationsQueued: 0,
+      notificationsSent: 0,
+      durationMs: 0,
+    }),
   };
   logger(`[bot-sync] Combined sync — new: ${result.newTasks}, changed: ${result.updatedTasks}, sent: ${result.sentTasks}`);
   return result;

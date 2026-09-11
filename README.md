@@ -10,7 +10,8 @@ A small Node.js client that can:
 6. import eligible Google Classroom coursework into the same task store as Єдина школа;
 7. sync new and changed homework from both sources to Telegram;
 8. provide current and completed homework screens in one Telegram interface;
-9. run an automatic sync every 10 minutes.
+9. run an automatic sync every 10 minutes by default (configurable from 5 to
+   60 minutes).
 
 Developer documentation:
 
@@ -47,6 +48,7 @@ CLASSROOM_COOKIES_JSON=
 CLASSROOM_COOKIES_FILE=classroom-cookies.json
 CLASSROOM_COURSE_ID=544644036115  # only for the single-course smoke-test
 HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
+HOMEWORK_SYNC_INTERVAL_MINUTES=10  # integer from 5 to 60; Render uses 20
 ```
 
 For the local Classroom web smoke-test, export cookies from an already
@@ -120,7 +122,28 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes, and handles Telegram commands in parallel. It syncs Єдину школу and, when a Classroom cookie source is configured, dynamically discovered Classroom coursework. Only assignments published on or after September 1, 2026 (Kyiv midnight) are included, for both pending and completed work. Neither edits nor due dates determine eligibility. Existing rows without publication remain hidden until the next successful scan fills their `publishedAt` snapshot field; data is not deleted. Classroom reads explicit not-turned-in and turned-in state filters, updates the stable course-qualified row, and treats only confirmed completed/returned states as completed; ambiguous states preserve the previous status. The first Classroom status reconciliation is quiet and recorded in PostgreSQL. Each new or changed task is queued in PostgreSQL and sent as a separate message without an inline completion button. Current and completed task lists still provide their respective action buttons. Telegram messages stay within the 4096-character limit; an oversized message gets a compact escaped version while the full snapshot remains in PostgreSQL.
+`npm run bot` runs one sync immediately, repeats it every 10 minutes by default,
+and handles Telegram commands in parallel. Set
+`HOMEWORK_SYNC_INTERVAL_MINUTES` to an integer from `5` to `60` to change the
+period; the prepared Render profile uses `20`. A longer period reduces polling
+and database activity but can delay discovery and notification retries by up to
+one interval plus the provider cycle duration. The first sync remains
+immediate, overlapping cycles are skipped, and shutdown cancels and drains the
+active cycle. The bot syncs Єдину школу and, when a Classroom cookie source is
+configured, dynamically discovered Classroom coursework. Only assignments
+published on or after September 1, 2026 (Kyiv midnight) are included, for both
+pending and completed work. Neither edits nor due dates determine eligibility.
+Existing rows without publication remain hidden until the next successful scan
+fills their `publishedAt` snapshot field; data is not deleted. Classroom reads
+explicit not-turned-in and turned-in state filters, updates the stable
+course-qualified row, and treats only confirmed completed/returned states as
+completed; ambiguous states preserve the previous status. The first Classroom
+status reconciliation is quiet and recorded in PostgreSQL. Each new or changed
+task is queued in PostgreSQL and sent as a separate message without an inline
+completion button. Current and completed task lists still provide their
+respective action buttons. Telegram messages stay within the 4096-character
+limit; an oversized message gets a compact escaped version while the full
+snapshot remains in PostgreSQL.
 
 ### Render deployment
 
@@ -133,7 +156,9 @@ runs `npm test`, and removes them before the service starts.
 After applying the Blueprint, configure these Render environment variables in
 the dashboard: `ESCHOOL_USERNAME`, `ESCHOOL_PASSWORD`, `TELEGRAM_BOT_TOKEN`,
 `TELEGRAM_CHAT_ID`, `HOMEWORK_DATABASE_URL`, and, when used, the already
-authenticated Classroom `CLASSROOM_COOKIE_HEADER`. Keep the database URL,
+authenticated Classroom `CLASSROOM_COOKIE_HEADER`. The Blueprint also sets
+`HOMEWORK_SYNC_INTERVAL_MINUTES=20`; change it only after reviewing the delay
+and retry trade-off. Keep the database URL,
 cookie header, and all credentials in the Render secret store; do not upload
 `.env`, cookie files, or Google credential files. A Classroom browser session
 can expire and then needs a fresh local export. Use the Neon pooled connection
@@ -155,14 +180,28 @@ the root path `/` returns 404. Both health methods return 200 when ready or
 not the success of provider sync or Telegram polling. Configuring the monitor
 is an operational step outside this repository.
 
-The GET `/healthz` response also includes `sync.eschool`: the latest attempt,
-last successful snapshot time, task count, status, and failure stage (`login`,
-`appointments`, `snapshot`, or `delivery`). `stale` is true when no successful
-snapshot is known or it is older than 30 minutes. Delivery errors are reported
-separately from successful snapshot storage. These diagnostics contain no task
-text or credentials and do not change the process readiness HTTP status.
-HEAD remains a process-only check. A metadata read failure reports diagnostics
-as unavailable; it does not change readiness.
+The GET `/healthz` response also includes in-memory `sync.eschool` and
+`sync.classroom` diagnostics: the latest attempt, last successful snapshot
+time, task count, status, metrics, and (for E-school) the failure stage. Before
+the first result a provider is `unknown` and `stale`. The stale threshold is
+derived from the configured interval (at least 30 minutes), so a 20-minute
+profile is not falsely stale after 30 minutes. Health GET and HEAD perform no
+SQL; they only read the bot's in-memory state. A provider error does not change
+readiness or trigger an application-side restart. These diagnostics contain no
+task text, SQL parameters, cookies, tokens, or connection strings. HEAD remains
+a process/readiness check without a response body.
+
+Safe rollout/rollback: run the full test suite on Node `24.21+`, review the
+before/after synthetic benchmark, and deploy with the existing Neon schema
+version 5; this change has no migration. Keep exactly one bot owner: stop the
+old `npm run bot` instance, verify its process chain has exited, then start the
+new instance. Confirm a GET `/healthz` returns ready, both provider diagnostics
+move from `unknown`, and no queue growth or duplicate messages appears during
+the first cycles. If the new process is unhealthy, stop it and restore the
+previous application revision with the same environment and database; do not
+delete or reset PostgreSQL state. After 24–72 hours, compare Neon counters over
+an exact window and sample missed/repeated notifications before changing the
+interval again.
 
 After an E-school login or appointment-read failure, the next scheduled cycle
 performs a full login instead of trusting the previous session. The existing
@@ -247,6 +286,18 @@ Run local logic tests:
 ```powershell
 npm test
 ```
+
+Run the repeatable local before/after benchmark on synthetic E-school and
+Classroom data (it never contacts either provider, PostgreSQL, or Telegram):
+
+```powershell
+npm run benchmark:neon -- --label=after --output=docs/neon-benchmark-after.json --before=docs/neon-benchmark-before.json
+```
+
+The benchmark reports SQL calls, returned rows, changed rows, and UTF-8 sizes
+of JSON-serialized result rows. The byte value is only an approximation of
+returned data, not Neon wire traffic or a Neon usage counter. See the generated
+reports in `docs/` for the fixed synthetic dataset and scenarios.
 
 ## What the smoke-test checks
 

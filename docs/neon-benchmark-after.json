@@ -1,0 +1,670 @@
+{
+  "label": "after",
+  "nodeVersion": "v24.21.0",
+  "sourceRoot": "C:\\projects\\HomeworkParser",
+  "data": {
+    "eschoolTasks": 120,
+    "classroomTasks": 120,
+    "longestDescriptionBytes": 3759
+  },
+  "providers": [
+    {
+      "source": "eschool",
+      "rows": [
+        {
+          "scenario": "baseline",
+          "sqlCalls": 8,
+          "returnedRows": 120,
+          "changedRows": 121,
+          "approxResultBytes": 14343,
+          "commands": {
+            "SELECT": 3,
+            "BEGIN": 1,
+            "INSERT": 3,
+            "COMMIT": 1
+          },
+          "observed": 120,
+          "inserted": 120,
+          "changed": 0,
+          "unchanged": 0,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 0,
+          "notificationsSent": 0,
+          "durationMs": 288.847
+        },
+        {
+          "scenario": "unchanged",
+          "sqlCalls": 7,
+          "returnedRows": 241,
+          "changedRows": 0,
+          "approxResultBytes": 270128,
+          "commands": {
+            "SELECT": 4,
+            "BEGIN": 1,
+            "UPDATE": 1,
+            "COMMIT": 1
+          },
+          "observed": 120,
+          "inserted": 0,
+          "changed": 0,
+          "unchanged": 120,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 0,
+          "notificationsSent": 0,
+          "durationMs": 71.487
+        },
+        {
+          "scenario": "single-change",
+          "sqlCalls": 11,
+          "returnedRows": 244,
+          "changedRows": 2,
+          "approxResultBytes": 293645,
+          "commands": {
+            "SELECT": 6,
+            "BEGIN": 1,
+            "UPDATE": 3,
+            "COMMIT": 1
+          },
+          "observed": 120,
+          "inserted": 0,
+          "changed": 1,
+          "unchanged": 119,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 1,
+          "notificationsSent": 1,
+          "durationMs": 73.716
+        },
+        {
+          "scenario": "missing-one",
+          "sqlCalls": 11,
+          "returnedRows": 242,
+          "changedRows": 3,
+          "approxResultBytes": 291651,
+          "commands": {
+            "SELECT": 6,
+            "BEGIN": 1,
+            "UPDATE": 3,
+            "COMMIT": 1
+          },
+          "observed": 119,
+          "inserted": 0,
+          "changed": 1,
+          "unchanged": 118,
+          "markedNotCurrent": 1,
+          "statusTransitions": 0,
+          "notificationsQueued": 1,
+          "notificationsSent": 1,
+          "durationMs": 74.337
+        },
+        {
+          "scenario": "status-change",
+          "notApplicable": true
+        }
+      ]
+    },
+    {
+      "source": "classroom",
+      "rows": [
+        {
+          "scenario": "baseline",
+          "sqlCalls": 13,
+          "returnedRows": 120,
+          "changedRows": 123,
+          "approxResultBytes": 6406,
+          "commands": {
+            "SELECT": 4,
+            "BEGIN": 2,
+            "INSERT": 5,
+            "COMMIT": 2
+          },
+          "observed": 120,
+          "inserted": 120,
+          "changed": 0,
+          "unchanged": 0,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 0,
+          "notificationsSent": 0,
+          "durationMs": 232.615
+        },
+        {
+          "scenario": "unchanged",
+          "sqlCalls": 11,
+          "returnedRows": 362,
+          "changedRows": 1,
+          "approxResultBytes": 392821,
+          "commands": {
+            "SELECT": 7,
+            "BEGIN": 1,
+            "DELETE": 1,
+            "COMMIT": 1,
+            "INSERT": 1
+          },
+          "observed": 120,
+          "inserted": 0,
+          "changed": 0,
+          "unchanged": 120,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 0,
+          "notificationsSent": 0,
+          "durationMs": 60.962
+        },
+        {
+          "scenario": "single-change",
+          "sqlCalls": 14,
+          "returnedRows": 365,
+          "changedRows": 3,
+          "approxResultBytes": 409867,
+          "commands": {
+            "SELECT": 8,
+            "BEGIN": 1,
+            "DELETE": 1,
+            "UPDATE": 2,
+            "COMMIT": 1,
+            "INSERT": 1
+          },
+          "observed": 120,
+          "inserted": 0,
+          "changed": 1,
+          "unchanged": 119,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 1,
+          "notificationsSent": 1,
+          "durationMs": 40.159
+        },
+        {
+          "scenario": "missing-one",
+          "sqlCalls": 14,
+          "returnedRows": 362,
+          "changedRows": 3,
+          "approxResultBytes": 406893,
+          "commands": {
+            "SELECT": 8,
+            "BEGIN": 1,
+            "DELETE": 1,
+            "UPDATE": 2,
+            "COMMIT": 1,
+            "INSERT": 1
+          },
+          "observed": 119,
+          "inserted": 0,
+          "changed": 1,
+          "unchanged": 118,
+          "markedNotCurrent": 0,
+          "statusTransitions": 0,
+          "notificationsQueued": 1,
+          "notificationsSent": 1,
+          "durationMs": 82.027
+        },
+        {
+          "scenario": "status-change",
+          "sqlCalls": 14,
+          "returnedRows": 365,
+          "changedRows": 2,
+          "approxResultBytes": 394939,
+          "commands": {
+            "SELECT": 9,
+            "BEGIN": 1,
+            "DELETE": 1,
+            "UPDATE": 1,
+            "COMMIT": 1,
+            "INSERT": 1
+          },
+          "observed": 119,
+          "inserted": 0,
+          "changed": 0,
+          "unchanged": 119,
+          "markedNotCurrent": 0,
+          "statusTransitions": 1,
+          "notificationsQueued": 0,
+          "notificationsSent": 0,
+          "durationMs": 135.25
+        }
+      ]
+    }
+  ],
+  "combined": [
+    {
+      "scenario": "baseline",
+      "sqlCalls": 21,
+      "returnedRows": 240,
+      "changedRows": 244,
+      "approxResultBytes": 20749
+    },
+    {
+      "scenario": "unchanged",
+      "sqlCalls": 18,
+      "returnedRows": 603,
+      "changedRows": 1,
+      "approxResultBytes": 662949
+    },
+    {
+      "scenario": "single-change",
+      "sqlCalls": 25,
+      "returnedRows": 609,
+      "changedRows": 5,
+      "approxResultBytes": 703512
+    },
+    {
+      "scenario": "missing-one",
+      "sqlCalls": 25,
+      "returnedRows": 604,
+      "changedRows": 6,
+      "approxResultBytes": 698544
+    },
+    {
+      "scenario": "status-change",
+      "sqlCalls": 14,
+      "returnedRows": 365,
+      "changedRows": 2,
+      "approxResultBytes": 394939
+    }
+  ],
+  "comparison": {
+    "label": "before -> after",
+    "providers": [
+      {
+        "source": "eschool",
+        "rows": [
+          {
+            "scenario": "baseline",
+            "sqlCalls": {
+              "before": 364,
+              "after": 8,
+              "delta": -356,
+              "ratio": 0.02197802197802198
+            },
+            "returnedRows": {
+              "before": 120,
+              "after": 120,
+              "delta": 0,
+              "ratio": 1
+            },
+            "changedRows": {
+              "before": 121,
+              "after": 121,
+              "delta": 0,
+              "ratio": 1
+            },
+            "approxResultBytes": {
+              "before": 135648,
+              "after": 14343,
+              "delta": -121305,
+              "ratio": 0.10573690728945506
+            }
+          },
+          {
+            "scenario": "unchanged",
+            "sqlCalls": {
+              "before": 245,
+              "after": 7,
+              "delta": -238,
+              "ratio": 0.02857142857142857
+            },
+            "returnedRows": {
+              "before": 241,
+              "after": 241,
+              "delta": 0,
+              "ratio": 1
+            },
+            "changedRows": {
+              "before": 240,
+              "after": 0,
+              "delta": -240,
+              "ratio": 0
+            },
+            "approxResultBytes": {
+              "before": 270366,
+              "after": 270128,
+              "delta": -238,
+              "ratio": 0.9991197117980811
+            }
+          },
+          {
+            "scenario": "single-change",
+            "sqlCalls": {
+              "before": 249,
+              "after": 11,
+              "delta": -238,
+              "ratio": 0.04417670682730924
+            },
+            "returnedRows": {
+              "before": 244,
+              "after": 244,
+              "delta": 0,
+              "ratio": 1
+            },
+            "changedRows": {
+              "before": 241,
+              "after": 2,
+              "delta": -239,
+              "ratio": 0.008298755186721992
+            },
+            "approxResultBytes": {
+              "before": 305697,
+              "after": 293645,
+              "delta": -12052,
+              "ratio": 0.9605753409421748
+            }
+          },
+          {
+            "scenario": "missing-one",
+            "sqlCalls": {
+              "before": 247,
+              "after": 11,
+              "delta": -236,
+              "ratio": 0.044534412955465584
+            },
+            "returnedRows": {
+              "before": 242,
+              "after": 242,
+              "delta": 0,
+              "ratio": 1
+            },
+            "changedRows": {
+              "before": 240,
+              "after": 3,
+              "delta": -237,
+              "ratio": 0.0125
+            },
+            "approxResultBytes": {
+              "before": 303557,
+              "after": 291651,
+              "delta": -11906,
+              "ratio": 0.9607783711131682
+            }
+          },
+          {
+            "scenario": "status-change",
+            "sqlCalls": null,
+            "returnedRows": null,
+            "changedRows": null,
+            "approxResultBytes": null
+          }
+        ]
+      },
+      {
+        "source": "classroom",
+        "rows": [
+          {
+            "scenario": "baseline",
+            "sqlCalls": {
+              "before": 847,
+              "after": 13,
+              "delta": -834,
+              "ratio": 0.015348288075560802
+            },
+            "returnedRows": {
+              "before": 360,
+              "after": 120,
+              "delta": -240,
+              "ratio": 0.3333333333333333
+            },
+            "changedRows": {
+              "before": 242,
+              "after": 123,
+              "delta": -119,
+              "ratio": 0.5082644628099173
+            },
+            "approxResultBytes": {
+              "before": 394064,
+              "after": 6406,
+              "delta": -387658,
+              "ratio": 0.016256242640789315
+            }
+          },
+          {
+            "scenario": "unchanged",
+            "sqlCalls": {
+              "before": 607,
+              "after": 11,
+              "delta": -596,
+              "ratio": 0.018121911037891267
+            },
+            "returnedRows": {
+              "before": 483,
+              "after": 362,
+              "delta": -121,
+              "ratio": 0.7494824016563147
+            },
+            "changedRows": {
+              "before": 240,
+              "after": 1,
+              "delta": -239,
+              "ratio": 0.004166666666666667
+            },
+            "approxResultBytes": {
+              "before": 524482,
+              "after": 392821,
+              "delta": -131661,
+              "ratio": 0.748969459390408
+            }
+          },
+          {
+            "scenario": "single-change",
+            "sqlCalls": {
+              "before": 610,
+              "after": 14,
+              "delta": -596,
+              "ratio": 0.022950819672131147
+            },
+            "returnedRows": {
+              "before": 486,
+              "after": 365,
+              "delta": -121,
+              "ratio": 0.7510288065843621
+            },
+            "changedRows": {
+              "before": 241,
+              "after": 3,
+              "delta": -238,
+              "ratio": 0.012448132780082987
+            },
+            "approxResultBytes": {
+              "before": 550140,
+              "after": 409867,
+              "delta": -140273,
+              "ratio": 0.7450230850329007
+            }
+          },
+          {
+            "scenario": "missing-one",
+            "sqlCalls": {
+              "before": 605,
+              "after": 14,
+              "delta": -591,
+              "ratio": 0.023140495867768594
+            },
+            "returnedRows": {
+              "before": 482,
+              "after": 362,
+              "delta": -120,
+              "ratio": 0.7510373443983402
+            },
+            "changedRows": {
+              "before": 239,
+              "after": 3,
+              "delta": -236,
+              "ratio": 0.012552301255230125
+            },
+            "approxResultBytes": {
+              "before": 546002,
+              "after": 406893,
+              "delta": -139109,
+              "ratio": 0.7452225449723627
+            }
+          },
+          {
+            "scenario": "status-change",
+            "sqlCalls": {
+              "before": 604,
+              "after": 14,
+              "delta": -590,
+              "ratio": 0.023178807947019868
+            },
+            "returnedRows": {
+              "before": 481,
+              "after": 365,
+              "delta": -116,
+              "ratio": 0.7588357588357588
+            },
+            "changedRows": {
+              "before": 239,
+              "after": 2,
+              "delta": -237,
+              "ratio": 0.008368200836820083
+            },
+            "approxResultBytes": {
+              "before": 522557,
+              "after": 394939,
+              "delta": -127618,
+              "ratio": 0.755781665923526
+            }
+          }
+        ]
+      }
+    ],
+    "combined": [
+      {
+        "scenario": "baseline",
+        "sqlCalls": {
+          "before": 1211,
+          "after": 21,
+          "delta": -1190,
+          "ratio": 0.017341040462427744
+        },
+        "returnedRows": {
+          "before": 480,
+          "after": 240,
+          "delta": -240,
+          "ratio": 0.5
+        },
+        "changedRows": {
+          "before": 363,
+          "after": 244,
+          "delta": -119,
+          "ratio": 0.6721763085399449
+        },
+        "approxResultBytes": {
+          "before": 529712,
+          "after": 20749,
+          "delta": -508963,
+          "ratio": 0.039170341619597066
+        }
+      },
+      {
+        "scenario": "unchanged",
+        "sqlCalls": {
+          "before": 852,
+          "after": 18,
+          "delta": -834,
+          "ratio": 0.02112676056338028
+        },
+        "returnedRows": {
+          "before": 724,
+          "after": 603,
+          "delta": -121,
+          "ratio": 0.8328729281767956
+        },
+        "changedRows": {
+          "before": 480,
+          "after": 1,
+          "delta": -479,
+          "ratio": 0.0020833333333333333
+        },
+        "approxResultBytes": {
+          "before": 794848,
+          "after": 662949,
+          "delta": -131899,
+          "ratio": 0.8340575808204839
+        }
+      },
+      {
+        "scenario": "single-change",
+        "sqlCalls": {
+          "before": 859,
+          "after": 25,
+          "delta": -834,
+          "ratio": 0.02910360884749709
+        },
+        "returnedRows": {
+          "before": 730,
+          "after": 609,
+          "delta": -121,
+          "ratio": 0.8342465753424657
+        },
+        "changedRows": {
+          "before": 482,
+          "after": 5,
+          "delta": -477,
+          "ratio": 0.01037344398340249
+        },
+        "approxResultBytes": {
+          "before": 855837,
+          "after": 703512,
+          "delta": -152325,
+          "ratio": 0.8220163418968799
+        }
+      },
+      {
+        "scenario": "missing-one",
+        "sqlCalls": {
+          "before": 852,
+          "after": 25,
+          "delta": -827,
+          "ratio": 0.029342723004694836
+        },
+        "returnedRows": {
+          "before": 724,
+          "after": 604,
+          "delta": -120,
+          "ratio": 0.8342541436464088
+        },
+        "changedRows": {
+          "before": 479,
+          "after": 6,
+          "delta": -473,
+          "ratio": 0.012526096033402923
+        },
+        "approxResultBytes": {
+          "before": 849559,
+          "after": 698544,
+          "delta": -151015,
+          "ratio": 0.8222430696396601
+        }
+      },
+      {
+        "scenario": "status-change",
+        "sqlCalls": {
+          "before": 604,
+          "after": 14,
+          "delta": -590,
+          "ratio": 0.023178807947019868
+        },
+        "returnedRows": {
+          "before": 481,
+          "after": 365,
+          "delta": -116,
+          "ratio": 0.7588357588357588
+        },
+        "changedRows": {
+          "before": 239,
+          "after": 2,
+          "delta": -237,
+          "ratio": 0.008368200836820083
+        },
+        "approxResultBytes": {
+          "before": 522557,
+          "after": 394939,
+          "delta": -127618,
+          "ratio": 0.755781665923526
+        }
+      }
+    ]
+  }
+}

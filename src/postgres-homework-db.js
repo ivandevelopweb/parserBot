@@ -25,6 +25,107 @@ const CLASSROOM_TOMBSTONE_SCHEMA = `
   )
 `;
 
+const HOMEWORK_TASK_COLUMNS = Object.freeze([
+  'id',
+  'source',
+  'external_id',
+  'fingerprint',
+  'target_appointment_id',
+  'normalized_description',
+  'homework_ids_json',
+  'snapshot_json',
+  'is_current',
+  'status',
+  'completion_origin',
+  'first_seen_at',
+  'last_seen_at',
+  'last_notified_at',
+  'notification_pending',
+  'notification_kind',
+  'completed_at',
+  'created_at',
+  'updated_at',
+]);
+const HOMEWORK_TASK_SELECT = HOMEWORK_TASK_COLUMNS.join(', ');
+const MATCH_BATCH_SIZE = 250;
+const INSERT_BATCH_SIZE = 100;
+
+function taskStorageValues(task) {
+  return {
+    source: sourceId(task),
+    externalId: externalId(task),
+    fingerprint: String(task.fingerprint),
+    targetAppointmentId: targetId(task),
+    normalizedDescription: String(task.snapshot?.description ?? ''),
+    homeworkIdsJson: serializeJson(task.homeworkIds ?? [], []),
+    snapshotJson: serializeJson(task.snapshot, {}),
+  };
+}
+
+function storageValuesEqual(previous, task) {
+  if (!previous) {
+    return false;
+  }
+  const current = taskStorageValues(task);
+  return previous.source === current.source
+    && String(previous.externalId ?? '') === String(current.externalId ?? '')
+    && previous.fingerprint === current.fingerprint
+    && String(previous.targetAppointmentId ?? '') === current.targetAppointmentId
+    && previous.normalizedDescription === current.normalizedDescription
+    && serializeJson(previous.homeworkIds ?? [], []) === current.homeworkIdsJson
+    && serializeJson(previous.snapshot ?? {}, {}) === current.snapshotJson;
+}
+
+function rowLikeTask(previous, task, timestamp, {
+  id = previous?.id ?? null,
+  isCurrent = previous?.isCurrent ?? true,
+  status = previous?.status ?? 'pending',
+  completionOrigin = previous?.completionOrigin ?? null,
+  completedAt = previous?.completedAt ?? null,
+  lastSeenAt = previous?.lastSeenAt ?? timestamp,
+  lastNotifiedAt = previous?.lastNotifiedAt ?? null,
+  notificationPending = previous?.notificationPending ?? false,
+  notificationKind = previous?.notificationKind ?? null,
+  firstSeenAt = previous?.firstSeenAt ?? timestamp,
+  createdAt = previous?.createdAt ?? timestamp,
+  updatedAt = previous?.updatedAt ?? timestamp,
+} = {}) {
+  const values = taskStorageValues(task);
+  return rowToTask({
+    id,
+    source: values.source,
+    external_id: values.externalId,
+    fingerprint: values.fingerprint,
+    target_appointment_id: values.targetAppointmentId,
+    normalized_description: values.normalizedDescription,
+    homework_ids_json: values.homeworkIdsJson,
+    snapshot_json: values.snapshotJson,
+    is_current: isCurrent ? 1 : 0,
+    status,
+    completion_origin: completionOrigin,
+    first_seen_at: firstSeenAt,
+    last_seen_at: lastSeenAt,
+    last_notified_at: lastNotifiedAt,
+    notification_pending: notificationPending ? 1 : 0,
+    notification_kind: notificationKind,
+    completed_at: completedAt,
+    created_at: createdAt,
+    updated_at: updatedAt,
+  });
+}
+
+function chunkValues(values, size) {
+  const chunks = [];
+  for (let index = 0; index < values.length; index += size) {
+    chunks.push(values.slice(index, index + size));
+  }
+  return chunks;
+}
+
+function parameterizedIn(column, values, firstParameter = 1) {
+  return `${column} IN (${values.map((_, index) => `$${firstParameter + index}`).join(', ')})`;
+}
+
 const POSTGRES_SCHEMA = `
   CREATE TABLE IF NOT EXISTS database_meta (
     key TEXT PRIMARY KEY,
@@ -143,19 +244,23 @@ function taskInsertValues(task, now, {
   status = 'pending',
   completionOrigin = null,
   completedAt = null,
+  isCurrent = status === 'pending' ? 1 : 0,
 } = {}) {
+  const values = taskStorageValues(task);
   return [
-    sourceId(task),
-    externalId(task),
-    task.fingerprint,
-    targetId(task),
-    String(task.snapshot.description ?? ''),
-    serializeJson(task.homeworkIds ?? [], []),
-    serializeJson(task.snapshot, {}),
+    values.source,
+    values.externalId,
+    values.fingerprint,
+    values.targetAppointmentId,
+    values.normalizedDescription,
+    values.homeworkIdsJson,
+    values.snapshotJson,
+    isCurrent,
     status,
     completionOrigin,
     now,
     now,
+    null,
     notificationPending,
     notificationKind,
     completedAt,
@@ -169,6 +274,10 @@ async function updateSeenTaskWithExecutor(executor, task, {
   notificationKind = null,
   previous,
 } = {}) {
+  if (!previous) {
+    throw new HomeworkDatabaseError('Cannot update a missing PostgreSQL homework task');
+  }
+  const values = taskStorageValues(task);
   const pending = notificationKind ? 1 : 0;
   const result = await executor.query(`
     UPDATE homework_tasks
@@ -181,27 +290,37 @@ async function updateSeenTaskWithExecutor(executor, task, {
         snapshot_json = $7,
         is_current = 1,
         last_seen_at = $8,
-        notification_pending = CASE WHEN $9 = 1 THEN 1 ELSE notification_pending END,
-        notification_kind = CASE WHEN $10 = 1 THEN $11 ELSE notification_kind END,
-        updated_at = $12
-    WHERE id = $13
-    RETURNING *
+        notification_pending = CASE WHEN $9 = 1 AND status = 'pending' THEN 1 ELSE notification_pending END,
+        notification_kind = CASE WHEN $9 = 1 AND status = 'pending' THEN $10 ELSE notification_kind END,
+        updated_at = $11
+    WHERE id = $12
+    RETURNING id
   `, [
-    sourceId(task),
-    externalId(task),
-    task.fingerprint,
-    targetId(task),
-    String(task.snapshot.description ?? ''),
-    serializeJson(task.homeworkIds ?? [], []),
-    serializeJson(task.snapshot, {}),
+    values.source,
+    values.externalId,
+    values.fingerprint,
+    values.targetAppointmentId,
+    values.normalizedDescription,
+    values.homeworkIdsJson,
+    values.snapshotJson,
     timestamp,
-    pending,
     pending,
     notificationKind,
     timestamp,
     Number(previous.id),
   ]);
-  return rowToTask(result.rows[0]);
+  if (!result.rows[0]) {
+    return null;
+  }
+  return rowLikeTask(previous, task, timestamp, {
+    isCurrent: true,
+    lastSeenAt: timestamp,
+    notificationPending: previous.notificationPending || Boolean(pending && previous.status === 'pending'),
+    notificationKind: pending && previous.status === 'pending'
+      ? notificationKind
+      : previous.notificationKind,
+    updatedAt: timestamp,
+  });
 }
 
 async function insertSeenTaskWithExecutor(executor, task, {
@@ -210,11 +329,14 @@ async function insertSeenTaskWithExecutor(executor, task, {
   status = 'pending',
   completionOrigin = null,
   completedAt = null,
+  isCurrent = status === 'pending' ? 1 : 0,
+  retiredExternalIds = null,
 } = {}) {
-  if (sourceId(task) === 'classroom') {
+  const taskExternalId = externalId(task);
+  if (sourceId(task) === 'classroom' && !retiredExternalIds) {
     const retired = await executor.query(
       'SELECT external_id FROM classroom_task_tombstones WHERE external_id = $1',
-      [externalId(task)],
+      [taskExternalId],
     );
     // Every insert path (including baselines and status-only observations)
     // must respect retention. Only a confirmed pending status clears this key.
@@ -222,37 +344,126 @@ async function insertSeenTaskWithExecutor(executor, task, {
       return null;
     }
   }
+  if (sourceId(task) === 'classroom' && retiredExternalIds?.has(taskExternalId)) {
+    return null;
+  }
   const pending = notificationKind ? 1 : 0;
-  const result = await executor.query(`
-    INSERT INTO homework_tasks (
-      source,
-      external_id,
-      fingerprint,
-      target_appointment_id,
-      normalized_description,
-      homework_ids_json,
-      snapshot_json,
-      is_current,
-      status,
-      completion_origin,
-      first_seen_at,
-      last_seen_at,
-      last_notified_at,
-      notification_pending,
-      notification_kind,
-      completed_at,
-      created_at,
-      updated_at
-    ) VALUES ($1, $2, $3, $4, $5, $6, $7, 1, $8, $9, $10, $11, NULL, $12, $13, $14, $15, $16)
-    RETURNING *
-  `, taskInsertValues(task, timestamp, {
+  const values = taskInsertValues(task, timestamp, {
     notificationPending: pending,
     notificationKind,
     status,
     completionOrigin,
     completedAt,
-  }));
-  return rowToTask(result.rows[0]);
+    isCurrent,
+  });
+  const result = await executor.query(`
+    INSERT INTO homework_tasks (
+      source, external_id, fingerprint, target_appointment_id,
+      normalized_description, homework_ids_json, snapshot_json,
+      is_current, status, completion_origin, first_seen_at, last_seen_at,
+      last_notified_at, notification_pending, notification_kind,
+      completed_at, created_at, updated_at
+    ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18)
+    RETURNING id
+  `, values);
+  const id = result.rows[0]?.id;
+  return id === undefined
+    ? null
+    : rowLikeTask(null, task, timestamp, {
+      id: Number(id),
+      isCurrent,
+      status,
+      completionOrigin,
+      completedAt,
+      notificationPending: Boolean(pending),
+      notificationKind,
+      lastSeenAt: timestamp,
+      firstSeenAt: timestamp,
+      createdAt: timestamp,
+      updatedAt: timestamp,
+    });
+}
+
+function buildMultiInsertQuery(entries) {
+  const columns = [
+    'source',
+    'external_id',
+    'fingerprint',
+    'target_appointment_id',
+    'normalized_description',
+    'homework_ids_json',
+    'snapshot_json',
+    'is_current',
+    'status',
+    'completion_origin',
+    'first_seen_at',
+    'last_seen_at',
+    'last_notified_at',
+    'notification_pending',
+    'notification_kind',
+    'completed_at',
+    'created_at',
+    'updated_at',
+  ];
+  const placeholders = entries.map((_, rowIndex) => (
+    `(${columns.map((__, columnIndex) => `$${rowIndex * columns.length + columnIndex + 1}`).join(', ')})`
+  ));
+  return `
+    INSERT INTO homework_tasks (${columns.join(', ')})
+    VALUES ${placeholders.join(', ')}
+    RETURNING id, fingerprint
+  `;
+}
+
+async function insertManySeenTasksWithExecutor(executor, entries, {
+  timestamp,
+  retiredExternalIds = null,
+} = {}) {
+  const accepted = entries.filter(({ task }) => (
+    sourceId(task) !== 'classroom'
+      || !retiredExternalIds?.has(externalId(task))
+  ));
+  const inserted = [];
+  for (const batch of chunkValues(accepted, INSERT_BATCH_SIZE)) {
+    if (batch.length === 0) {
+      continue;
+    }
+    const values = batch.flatMap(({ task, notificationKind = null, status = 'pending',
+      completionOrigin = null, completedAt = null, isCurrent = status === 'pending' ? 1 : 0 }) => (
+      taskInsertValues(task, timestamp, {
+        notificationPending: notificationKind ? 1 : 0,
+        notificationKind,
+        status,
+        completionOrigin,
+        completedAt,
+        isCurrent,
+      })
+    ));
+    const result = await executor.query(buildMultiInsertQuery(batch), values);
+    const idsByFingerprint = new Map(
+      result.rows.map((row) => [String(row.fingerprint), Number(row.id)]),
+    );
+    for (const entry of batch) {
+      const id = idsByFingerprint.get(String(entry.task.fingerprint));
+      if (id === undefined) {
+        continue;
+      }
+      inserted.push(rowLikeTask(null, entry.task, timestamp, {
+        id,
+        isCurrent: entry.isCurrent ?? (entry.status === 'pending' ? 1 : 0),
+        status: entry.status ?? 'pending',
+        completionOrigin: entry.completionOrigin ?? null,
+        completedAt: entry.completedAt ?? null,
+        notificationPending: Boolean(entry.notificationKind),
+        notificationKind: entry.notificationKind ?? null,
+        lastSeenAt: timestamp,
+        firstSeenAt: timestamp,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      }));
+    }
+  }
+  return inserted;
 }
 
 export async function createPostgresHomeworkDatabase({
@@ -414,15 +625,22 @@ export async function createPostgresHomeworkDatabase({
   }
 
   async function findById(id, executor = databasePool) {
-    const result = await executor.query('SELECT * FROM homework_tasks WHERE id = $1', [Number(id)]);
+    const result = await executor.query(
+      `SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks WHERE id = $1`,
+      [Number(id)],
+    );
     return rowToTask(result.rows[0]);
   }
 
   async function findByFingerprint(fingerprint, source = null) {
     const result = source === null || source === undefined
-      ? await query('SELECT * FROM homework_tasks WHERE fingerprint = $1', [String(fingerprint)])
+      ? await query(
+        `SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks WHERE fingerprint = $1`,
+        [String(fingerprint)],
+      )
       : await query(
-        'SELECT * FROM homework_tasks WHERE source = $1 AND fingerprint = $2',
+        `SELECT ${HOMEWORK_TASK_SELECT}
+         FROM homework_tasks WHERE source = $1 AND fingerprint = $2`,
         [sourceId({ source }), String(fingerprint)],
       );
     return rowToTask(result.rows[0]);
@@ -433,7 +651,8 @@ export async function createPostgresHomeworkDatabase({
       return null;
     }
     const result = await executor.query(
-      'SELECT * FROM homework_tasks WHERE source = $1 AND external_id = $2',
+      `SELECT ${HOMEWORK_TASK_SELECT}
+       FROM homework_tasks WHERE source = $1 AND external_id = $2`,
       [sourceId({ source }), String(external)],
     );
     return rowToTask(result.rows[0]);
@@ -467,43 +686,91 @@ export async function createPostgresHomeworkDatabase({
       return true;
     };
 
-    for (let index = 0; index < uniqueTasks.length; index += 1) {
-      const task = uniqueTasks[index];
-      assign(index, await findByExternalId(externalId(task), sourceId(task)));
-    }
-    for (let index = 0; index < uniqueTasks.length; index += 1) {
-      if (!matches[index]) {
-        const task = uniqueTasks[index];
-        assign(index, await findByFingerprint(task.fingerprint, sourceId(task)));
-      }
-    }
-
-    const pendingByAppointment = new Map();
+    const grouped = new Map();
     uniqueTasks.forEach((task, index) => {
-      if (matches[index] || sourceId(task) !== 'eschool') {
-        return;
-      }
-      const appointmentId = targetId(task);
-      if (!appointmentId) {
-        return;
-      }
-      const indexes = pendingByAppointment.get(appointmentId) ?? [];
-      indexes.push(index);
-      pendingByAppointment.set(appointmentId, indexes);
+      const source = sourceId(task);
+      const group = grouped.get(source) ?? { indexes: [], externalIds: [], fingerprints: [] };
+      group.indexes.push(index);
+      const external = externalId(task);
+      if (external) group.externalIds.push(external);
+      group.fingerprints.push(String(task.fingerprint));
+      grouped.set(source, group);
     });
 
-    for (const [appointmentId, indexes] of pendingByAppointment) {
+    async function loadByAny(source, column, values) {
+      const rows = [];
+      for (const batch of chunkValues([...new Set(values)], MATCH_BATCH_SIZE)) {
+        if (batch.length === 0) continue;
+        const result = await query(
+          `SELECT ${HOMEWORK_TASK_SELECT}
+           FROM homework_tasks
+           WHERE source = $1 AND ${parameterizedIn(column, batch, 2)}
+           ORDER BY id`,
+          [source, ...batch],
+        );
+        rows.push(...result.rows.map(rowToTask));
+      }
+      return rows;
+    }
+
+    for (const [source, group] of grouped) {
+      const externalRows = await loadByAny(source, 'external_id', group.externalIds);
+      const externalMap = new Map();
+      for (const row of externalRows) {
+        const key = String(row.externalId ?? '');
+        if (!externalMap.has(key)) externalMap.set(key, []);
+        externalMap.get(key).push(row);
+      }
+      for (const index of group.indexes) {
+        assign(index, externalMap.get(String(externalId(uniqueTasks[index]) ?? ''))?.shift());
+      }
+
+      const fingerprintRows = await loadByAny(source, 'fingerprint', group.fingerprints);
+      const fingerprintMap = new Map();
+      for (const row of fingerprintRows) {
+        if (!fingerprintMap.has(row.fingerprint)) fingerprintMap.set(row.fingerprint, []);
+        fingerprintMap.get(row.fingerprint).push(row);
+      }
+      for (const index of group.indexes) {
+        if (!matches[index]) {
+          assign(index, fingerprintMap.get(String(uniqueTasks[index].fingerprint))?.shift());
+        }
+      }
+    }
+
+    const appointmentIds = [...new Set(uniqueTasks
+      .map((task, index) => matches[index] || sourceId(task) !== 'eschool' ? null : targetId(task))
+      .filter(Boolean))];
+    for (const batch of chunkValues(appointmentIds, MATCH_BATCH_SIZE)) {
+      if (batch.length === 0) continue;
       const result = await query(
-        `SELECT * FROM homework_tasks
-         WHERE source = $1 AND target_appointment_id = $2
+        `SELECT ${HOMEWORK_TASK_SELECT}
+         FROM homework_tasks
+         WHERE source = $1 AND ${parameterizedIn('target_appointment_id', batch, 2)}
          ORDER BY id`,
-        ['eschool', appointmentId],
+        ['eschool', ...batch],
       );
-      const candidates = result.rows
-        .map(rowToTask)
-        .filter((row) => !reservedRowIds.has(row.id));
-      if (indexes.length === 1 && candidates.length === 1) {
-        assign(indexes[0], candidates[0]);
+      const candidatesByAppointment = new Map();
+      for (const row of result.rows.map(rowToTask)) {
+        const key = String(row.targetAppointmentId ?? '');
+        if (!candidatesByAppointment.has(key)) candidatesByAppointment.set(key, []);
+        candidatesByAppointment.get(key).push(row);
+      }
+      const pendingByAppointment = new Map();
+      uniqueTasks.forEach((task, index) => {
+        if (matches[index] || sourceId(task) !== 'eschool') return;
+        const appointmentId = targetId(task);
+        if (!batch.includes(appointmentId)) return;
+        const indexes = pendingByAppointment.get(appointmentId) ?? [];
+        indexes.push(index);
+        pendingByAppointment.set(appointmentId, indexes);
+      });
+      for (const [appointmentId, indexes] of pendingByAppointment) {
+        const candidates = (candidatesByAppointment.get(appointmentId) ?? [])
+          .filter((row) => !reservedRowIds.has(row.id));
+        if (indexes.length === 1 && candidates.length === 1) {
+          assign(indexes[0], candidates[0]);
+        }
       }
     }
 
@@ -516,7 +783,7 @@ export async function createPostgresHomeworkDatabase({
 
   async function currentTasks() {
     const result = await query(`
-      SELECT * FROM homework_tasks
+      SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks
       WHERE is_current = 1 AND status = 'pending'
       ORDER BY
         CASE WHEN COALESCE(snapshot_json::jsonb ->> 'targetDate', '') = '' THEN 1 ELSE 0 END,
@@ -528,7 +795,7 @@ export async function createPostgresHomeworkDatabase({
 
   async function completedTasks() {
     const result = await query(`
-      SELECT * FROM homework_tasks
+      SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks
       WHERE status = 'completed'
       ORDER BY
         CASE WHEN COALESCE(snapshot_json::jsonb ->> 'targetDate', '') = '' THEN 1 ELSE 0 END,
@@ -540,17 +807,20 @@ export async function createPostgresHomeworkDatabase({
   }
 
   async function pendingNotifications(source = null) {
+    const values = [];
+    const sourceClause = source === null || source === undefined
+      ? ''
+      : (() => {
+        values.push(sourceId({ source }));
+        return ' AND source = $1';
+      })();
     const result = await query(`
-      SELECT * FROM homework_tasks
-      WHERE notification_pending = 1
+      SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks
+      WHERE notification_pending = 1${sourceClause}
       ORDER BY id
-    `);
+    `, values);
     const tasks = result.rows.map(rowToTask).filter(isTaskInAccountingPeriod);
-    if (source === null || source === undefined) {
-      return tasks;
-    }
-    const normalizedSource = sourceId({ source });
-    return tasks.filter((task) => task.source === normalizedSource);
+    return tasks;
   }
 
   async function markAllNotCurrent(timestamp) {
@@ -569,25 +839,101 @@ export async function createPostgresHomeworkDatabase({
     );
   }
 
-  async function saveBaseline(tasks, timestamp, { source = null } = {}) {
+  async function loadRetiredClassroomIds(executor, tasks) {
+    const ids = [...new Set(tasks
+      .filter((task) => sourceId(task) === 'classroom')
+      .map((task) => externalId(task))
+      .filter(Boolean))];
+    const retired = new Set();
+    for (const batch of chunkValues(ids, MATCH_BATCH_SIZE)) {
+      if (batch.length === 0) continue;
+      const result = await executor.query(
+        `SELECT external_id FROM classroom_task_tombstones
+         WHERE ${parameterizedIn('external_id', batch, 1)}`,
+        batch,
+      );
+      for (const row of result.rows) retired.add(String(row.external_id));
+    }
+    return retired;
+  }
+
+  async function restoreClassroomTombstones(executor, updates, snapshotComplete) {
+    if (snapshotComplete === false) {
+      return new Set();
+    }
+    const ids = [...new Set(updates
+      .filter((update) => update.status === 'pending'
+        && isTaskInAccountingPeriod(update.task))
+      .map((update) => externalId(update.task))
+      .filter(Boolean))];
+    const restored = new Set();
+    for (const batch of chunkValues(ids, MATCH_BATCH_SIZE)) {
+      if (batch.length === 0) continue;
+      const result = await executor.query(
+        `DELETE FROM classroom_task_tombstones
+         WHERE ${parameterizedIn('external_id', batch, 1)}
+         RETURNING external_id`,
+        batch,
+      );
+      for (const row of result.rows) restored.add(String(row.external_id));
+    }
+    return restored;
+  }
+
+  async function saveBaseline(tasks, timestamp, {
+    source = null,
+    statusUpdates = [],
+  } = {}) {
     const now = normalizeTimestampForStorage(timestamp);
     const taskSource = source
       ? sourceId({ source })
       : sourceId(tasks[0] ?? {});
+    const statusByIdentity = new Map();
+    for (const entry of statusUpdates ?? []) {
+      const task = entry?.task ?? entry;
+      const status = String(entry?.status ?? task?.classroomStatus ?? '')
+        .trim()
+        .toLowerCase();
+      if (taskSource === 'classroom' && ['pending', 'completed'].includes(status)) {
+        statusByIdentity.set(taskIdentity(task), status);
+      }
+    }
     const matches = await findMatches(tasks);
     try {
-      await withTransaction(async (client) => {
-        for (const { task, previous } of matches) {
-          if (previous) {
-            continue;
-          }
-          await insertSeenTaskWithExecutor(client, task, {
-            timestamp: now,
-            notificationKind: null,
-          });
-        }
+      const result = await withTransaction(async (client) => {
+        const missing = matches.filter(({ previous }) => !previous);
+        const retiredExternalIds = await loadRetiredClassroomIds(
+          client,
+          missing.map(({ task }) => task),
+        );
+        const inserted = await insertManySeenTasksWithExecutor(
+          client,
+          missing.map(({ task }) => {
+            const status = statusByIdentity.get(taskIdentity(task))
+              ?? (taskSource === 'classroom' && task.classroomStatus === 'completed'
+                ? 'completed'
+                : 'pending');
+            return {
+              task,
+              notificationKind: null,
+              status,
+              completionOrigin: status === 'completed' && taskSource === 'classroom'
+                ? 'classroom'
+                : null,
+              completedAt: status === 'completed' ? now : null,
+              isCurrent: status === 'pending' ? 1 : 0,
+            };
+          }),
+          { timestamp: now, retiredExternalIds },
+        );
         await setMetaWithExecutor(client, baselineMetaKey(taskSource), now);
+        return {
+          inserted: inserted.length,
+          unchanged: matches.length - missing.length,
+          statusAppliedIdentities: inserted.map((task) => taskIdentity(task)),
+        };
       });
+      return result;
     } catch (error) {
       throw wrapDatabaseError('Could not initialize PostgreSQL database baseline', error);
     }
@@ -597,147 +943,142 @@ export async function createPostgresHomeworkDatabase({
     await saveBaseline(tasks, timestamp, { source: 'eschool' });
   }
 
-  async function updateClassroomTaskSnapshotWithExecutor(executor, task, timestamp, id) {
-    const result = await executor.query(`
-      UPDATE homework_tasks
-      SET source = $1,
-          external_id = $2,
-          fingerprint = $3,
-          target_appointment_id = $4,
-          normalized_description = $5,
-          homework_ids_json = $6,
-          snapshot_json = $7,
-          last_seen_at = $8,
-          updated_at = $8
-      WHERE id = $9
-      RETURNING *
-    `, [
-      sourceId(task),
-      externalId(task),
-      task.fingerprint,
-      targetId(task),
-      String(task.snapshot.description ?? ''),
-      serializeJson(task.homeworkIds ?? [], []),
-      serializeJson(task.snapshot, {}),
-      timestamp,
-      Number(id),
-    ]);
-    return rowToTask(result.rows[0]);
+  async function findRowsByIdsWithExecutor(executor, ids) {
+    const rows = [];
+    for (const batch of chunkValues([...new Set(ids.map(Number).filter(Number.isSafeInteger))], MATCH_BATCH_SIZE)) {
+      if (batch.length === 0) continue;
+      const result = await executor.query(
+        `SELECT ${HOMEWORK_TASK_SELECT} FROM homework_tasks
+         WHERE ${parameterizedIn('id', batch, 1)}`,
+        batch,
+      );
+      rows.push(...result.rows.map(rowToTask));
+    }
+    return new Map(rows.map((row) => [row.id, row]));
   }
 
-  async function applyClassroomStatusUpdateWithExecutor(
-    executor,
-    { task, status, allowInsert = true },
+  async function updateObservedTaskWithExecutor(executor, {
+    task,
+    existing,
     timestamp,
-    preserveNotificationIdentities,
-  ) {
+    notificationKind = null,
+    statusUpdate = null,
+  }) {
     assertTask(task);
-    const normalizedStatus = String(status ?? '').trim().toLowerCase();
-    if (normalizedStatus !== 'pending' && normalizedStatus !== 'completed') {
-      return null;
-    }
-    const taskExternalId = externalId(task);
-    if (!taskExternalId) {
-      throw new HomeworkDatabaseError('Classroom status update is missing an external id');
-    }
-
-    const existing = await findByExternalIdWithExecutor(
-      executor,
-      taskExternalId,
-      'classroom',
-    );
-    // Refresh publication evidence for pre-policy rows without importing or
-    // reconciling out-of-period history. Unknown publication is not eligibility.
-    if (!isTaskInAccountingPeriod(task)) {
-      if (!existing) {
-        return null;
-      }
-      const refreshed = await updateClassroomTaskSnapshotWithExecutor(
-        executor, task, timestamp, existing.id,
-      );
-      await executor.query(`
-        UPDATE homework_tasks
-        SET notification_pending = 0, notification_kind = NULL WHERE id = $1
-      `, [existing.id]);
-      return { ...refreshed, notificationPending: false, notificationKind: null };
-    }
     if (!existing) {
-      if (!allowInsert) {
-        return null;
+      return { row: null, changed: false, statusChanged: false, queueChanged: false };
+    }
+
+    const values = taskStorageValues(task);
+    const classroomStatus = statusUpdate?.status ?? null;
+    const outsideAccountingPeriod = statusUpdate
+      && !isTaskInAccountingPeriod(task);
+    let nextStatus = existing.status;
+    let nextOrigin = existing.completionOrigin;
+    let nextCompletedAt = existing.completedAt;
+    let nextIsCurrent = existing.isCurrent;
+
+    // Manual actions are authoritative. Provider data can refresh the task
+    // payload, but it cannot undo a manual completion/restoration.
+    if (classroomStatus && !outsideAccountingPeriod
+      && existing.completionOrigin !== 'manual') {
+      if (classroomStatus === 'completed') {
+        nextStatus = 'completed';
+        nextOrigin = 'classroom';
+        nextIsCurrent = false;
+        nextCompletedAt = existing.completedAt ?? timestamp;
+      } else if (classroomStatus === 'pending') {
+        nextStatus = 'pending';
+        nextOrigin = null;
+        nextIsCurrent = true;
+        nextCompletedAt = null;
       }
-      return insertSeenTaskWithExecutor(executor, task, {
-        timestamp,
-        notificationKind: null,
-        status: normalizedStatus,
-        completionOrigin: normalizedStatus === 'completed' ? 'classroom' : null,
-        completedAt: normalizedStatus === 'completed' ? timestamp : null,
-      });
+    } else if (!classroomStatus && sourceId(task) === 'eschool') {
+      nextIsCurrent = true;
+    } else if (!classroomStatus && existing.completionOrigin !== 'manual') {
+      nextIsCurrent = true;
     }
 
-    // Telegram decisions are an explicit local override. A Classroom scan can
-    // refresh the snapshot, but it must not undo either manual completion or
-    // manual restoration.
-    if (existing.completionOrigin === 'manual') {
-      return updateClassroomTaskSnapshotWithExecutor(executor, task, timestamp, existing.id);
+    let nextNotificationPending = existing.notificationPending;
+    let nextNotificationKind = existing.notificationKind;
+    if (outsideAccountingPeriod || nextStatus === 'completed') {
+      nextNotificationPending = false;
+      nextNotificationKind = null;
+    } else if (notificationKind && nextStatus === 'pending'
+      && existing.completionOrigin !== 'manual') {
+      nextNotificationPending = true;
+      nextNotificationKind = notificationKind;
     }
 
-    const commonValues = [
-      sourceId(task),
-      taskExternalId,
-      task.fingerprint,
-      targetId(task),
-      String(task.snapshot.description ?? ''),
-      serializeJson(task.homeworkIds ?? [], []),
-      serializeJson(task.snapshot, {}),
-      timestamp,
-      Number(existing.id),
-    ];
-
-    if (normalizedStatus === 'completed') {
-      const preserveNotification = preserveNotificationIdentities.has(taskExternalId) ? 1 : 0;
-      const result = await executor.query(`
-        UPDATE homework_tasks
-        SET source = $1,
-            external_id = $2,
-            fingerprint = $3,
-            target_appointment_id = $4,
-            normalized_description = $5,
-            homework_ids_json = $6,
-            snapshot_json = $7,
-            is_current = 0,
-            status = 'completed',
-            completion_origin = 'classroom',
-            first_seen_at = first_seen_at,
-            last_seen_at = $8,
-            completed_at = COALESCE(completed_at, $8),
-            notification_pending = CASE WHEN $10 = 1 THEN notification_pending ELSE 0 END,
-            notification_kind = CASE WHEN $10 = 1 THEN notification_kind ELSE NULL END,
-            updated_at = $8
-        WHERE id = $9
-        RETURNING *
-      `, [...commonValues, preserveNotification]);
-      return rowToTask(result.rows[0]);
+    const dataChanged = !storageValuesEqual(existing, task);
+    const statusChanged = existing.status !== nextStatus
+      || existing.completionOrigin !== nextOrigin
+      || existing.completedAt !== nextCompletedAt;
+    const currentChanged = existing.isCurrent !== nextIsCurrent;
+    const queueChanged = existing.notificationPending !== nextNotificationPending
+      || existing.notificationKind !== nextNotificationKind;
+    const observedChanged = dataChanged || statusChanged || currentChanged;
+    if (!observedChanged && !queueChanged) {
+      return { row: existing, changed: false, statusChanged: false, queueChanged: false };
     }
 
+    const assignments = [];
+    const parameters = [];
+    const add = (column, value) => {
+      parameters.push(value);
+      assignments.push(`${column} = $${parameters.length}`);
+    };
+    if (dataChanged) {
+      add('source', values.source);
+      add('external_id', values.externalId);
+      add('fingerprint', values.fingerprint);
+      add('target_appointment_id', values.targetAppointmentId);
+      add('normalized_description', values.normalizedDescription);
+      add('homework_ids_json', values.homeworkIdsJson);
+      add('snapshot_json', values.snapshotJson);
+    }
+    if (currentChanged) add('is_current', nextIsCurrent ? 1 : 0);
+    if (statusChanged) {
+      add('status', nextStatus);
+      add('completion_origin', nextOrigin);
+      add('completed_at', nextCompletedAt);
+    }
+    if (queueChanged) {
+      add('notification_pending', nextNotificationPending ? 1 : 0);
+      add('notification_kind', nextNotificationKind);
+    }
+    if (observedChanged) add('last_seen_at', timestamp);
+    add('updated_at', timestamp);
+    const idParameter = parameters.length + 1;
+    parameters.push(Number(existing.id));
     const result = await executor.query(`
       UPDATE homework_tasks
-      SET source = $1,
-          external_id = $2,
-          fingerprint = $3,
-          target_appointment_id = $4,
-          normalized_description = $5,
-          homework_ids_json = $6,
-          snapshot_json = $7,
-          is_current = CASE WHEN status = 'completed' THEN 1 ELSE is_current END,
-          status = CASE WHEN status = 'completed' THEN 'pending' ELSE status END,
-          completion_origin = CASE WHEN status = 'completed' THEN NULL ELSE completion_origin END,
-          completed_at = CASE WHEN status = 'completed' THEN NULL ELSE completed_at END,
-          last_seen_at = $8,
-          updated_at = $8
-      WHERE id = $9
-      RETURNING *
-    `, commonValues);
-    return rowToTask(result.rows[0]);
+      SET ${assignments.join(', ')}
+      WHERE id = $${idParameter}
+        AND (${statusUpdate && existing.completionOrigin !== 'manual'
+          ? "completion_origin IS NULL OR completion_origin <> 'manual'"
+          : 'TRUE'})
+      RETURNING id
+    `, parameters);
+    if (!result.rows[0]) {
+      return { row: null, changed: false, statusChanged: false, queueChanged: false };
+    }
+    return {
+      row: rowLikeTask(existing, task, timestamp, {
+        id: existing.id,
+        isCurrent: nextIsCurrent,
+        status: nextStatus,
+        completionOrigin: nextOrigin,
+        completedAt: nextCompletedAt,
+        lastSeenAt: observedChanged ? timestamp : existing.lastSeenAt,
+        notificationPending: nextNotificationPending,
+        notificationKind: nextNotificationKind,
+        updatedAt: timestamp,
+      }),
+      changed: dataChanged,
+      statusChanged,
+      queueChanged,
+    };
   }
 
   async function applyProviderSnapshot(plan, timestamp, {
@@ -749,104 +1090,180 @@ export async function createPostgresHomeworkDatabase({
     statusReconciliationMetaKey = CLASSROOM_STATUS_RECONCILED_META_KEY,
   } = {}) {
     const now = normalizeTimestampForStorage(timestamp ?? new Date());
-    const taskSource = sourceId({ source: source ?? plan[0]?.task?.source ?? statusUpdates[0]?.task?.source });
+    const taskSource = sourceId({
+      source: source ?? plan[0]?.task?.source ?? statusUpdates[0]?.task?.source,
+    });
     const normalizedStatusUpdates = [];
     const statusByIdentity = new Map();
     for (const entry of statusUpdates ?? []) {
       const task = entry?.task ?? entry;
       const status = String(entry?.status ?? task?.classroomStatus ?? '').trim().toLowerCase();
-      if (taskSource !== 'classroom' || (status !== 'pending' && status !== 'completed')) {
-        continue;
-      }
+      if (taskSource !== 'classroom' || !['pending', 'completed'].includes(status)) continue;
       assertTask(task);
       const identity = externalId(task);
       if (!identity) {
         throw new HomeworkDatabaseError('Classroom status update is missing an external id');
       }
       const previousStatus = statusByIdentity.get(identity);
-      if (previousStatus && previousStatus.status !== status) {
-        previousStatus.status = 'unknown';
+      if (previousStatus) {
+        if (previousStatus.status !== status) previousStatus.status = 'unknown';
         continue;
       }
-      if (!previousStatus) {
-        const normalized = {
-          task,
-          status,
-          allowInsert: entry?.allowInsert !== false,
-        };
-        statusByIdentity.set(identity, normalized);
-        normalizedStatusUpdates.push(normalized);
-      }
+      const normalized = {
+        task,
+        status,
+        allowInsert: entry?.allowInsert !== false,
+        previous: entry?.previous,
+      };
+      statusByIdentity.set(identity, normalized);
+      normalizedStatusUpdates.push(normalized);
     }
 
-    const preserveNotificationIdentities = new Set(
-      (plan ?? [])
-        .filter((entry) => entry?.notificationKind === 'changed')
-        .map((entry) => externalId(entry.task))
-        .filter(Boolean),
-    );
+    const observations = new Map();
+    for (const entry of plan ?? []) {
+      assertTask(entry.task);
+      const identity = taskIdentity(entry.task);
+      const observation = observations.get(identity) ?? { task: entry.task };
+      if (observation.content === undefined) observation.content = entry;
+      observations.set(identity, observation);
+    }
+    for (const update of normalizedStatusUpdates) {
+      const identity = taskIdentity(update.task);
+      const observation = observations.get(identity) ?? { task: update.task };
+      observation.task = observation.content?.task ?? update.task;
+      observation.status = update;
+      observations.set(identity, observation);
+    }
+
     try {
-      const resolvedPlan = await Promise.all((plan ?? []).map(async (entry) => ({
-        ...entry,
-        // `null` is an explicit no-match from the sync planner. Only an
-        // omitted previous row needs a compatibility lookup.
-        previous: entry.previous === undefined
-          ? await findMatch(entry.task)
-          : entry.previous,
-      })));
-      return await withTransaction(async (client) => {
-        // Classroom does not sweep rows that are absent from one response:
-        // the live investigation found a small but repeatable gap between
-        // state-filtered result sets, so absence is deliberately not treated
-        // as completion or deletion. E-school keeps its existing sweep.
-        if (taskSource !== 'classroom' && snapshotComplete !== false) {
-          await client.query(
-            `UPDATE homework_tasks
-             SET is_current = 0, updated_at = $1
-             WHERE source = $2 AND is_current = 1`,
-            [now, taskSource],
-          );
+      const unresolved = [];
+      for (const observation of observations.values()) {
+        if (observation.content?.previous === undefined) unresolved.push(observation.task);
+        if (observation.status && observation.status.previous === undefined) {
+          unresolved.push(observation.status.task);
         }
-        for (const update of normalizedStatusUpdates) {
-          if (update.status !== 'pending' || snapshotComplete === false
-            || !isTaskInAccountingPeriod(update.task)) {
+      }
+      const lookup = unresolved.length > 0
+        ? await findMatches(unresolved)
+        : [];
+      const lookupByIdentity = new Map(
+        lookup.map(({ task, previous }) => [taskIdentity(task), previous]),
+      );
+
+      return await withTransaction(async (client) => {
+        const ids = [...observations.values()]
+          .map((observation) => observation.content?.previous?.id
+            ?? lookupByIdentity.get(taskIdentity(observation.task))?.id)
+          .filter((id) => id !== undefined && id !== null);
+        const freshRows = await findRowsByIdsWithExecutor(client, ids);
+        const restoredTombstones = taskSource === 'classroom'
+          ? await restoreClassroomTombstones(
+            client,
+            normalizedStatusUpdates,
+            snapshotComplete,
+          )
+          : new Set();
+        const presentIds = new Set();
+        const missing = [];
+        const rows = [];
+        let inserted = 0;
+        let changed = 0;
+        let unchanged = 0;
+        let statusTransitions = 0;
+        let notificationsQueued = 0;
+
+        for (const observation of observations.values()) {
+          const content = observation.content;
+          const statusUpdate = observation.status?.status === 'unknown'
+            ? null
+            : observation.status;
+          const plannedPrevious = content?.previous !== undefined
+            ? content.previous
+            : observation.status?.previous !== undefined
+              ? observation.status.previous
+              : lookupByIdentity.get(taskIdentity(observation.task));
+          const existing = plannedPrevious?.id
+            ? freshRows.get(Number(plannedPrevious.id)) ?? plannedPrevious
+            : null;
+          const notificationKind = content?.notificationKind ?? null;
+
+          if (existing) {
+            presentIds.add(existing.id);
+            const outcome = await updateObservedTaskWithExecutor(client, {
+              task: observation.task,
+              existing,
+              timestamp: now,
+              notificationKind,
+              statusUpdate,
+            });
+            if (outcome.row) rows.push(outcome.row);
+            if (content) {
+              if (outcome.changed) changed += 1;
+              else unchanged += 1;
+            }
+            if (outcome.statusChanged) statusTransitions += 1;
+            if (outcome.queueChanged && outcome.row?.notificationPending) {
+              notificationsQueued += 1;
+            }
             continue;
           }
-          const restored = await client.query(
-            'DELETE FROM classroom_task_tombstones WHERE external_id = $1 RETURNING external_id',
-            [externalId(update.task)],
-          );
-          // Previously known work can return only after passing the publication
-          // policy above; retention must never bypass the accounting period.
-          if (restored.rows.length > 0) {
-            update.allowInsert = true;
+
+          if (statusUpdate && (!isTaskInAccountingPeriod(observation.task)
+            || (statusUpdate.allowInsert === false
+              && !restoredTombstones.has(externalId(observation.task))))) {
+            continue;
           }
-        }
-        const rows = [];
-        for (const entry of resolvedPlan) {
-          const existing = entry.previous;
-          const row = existing
-            ? await updateSeenTaskWithExecutor(client, entry.task, {
-              timestamp: now,
-              notificationKind: entry.notificationKind ?? null,
-              previous: existing,
-            })
-            : await insertSeenTaskWithExecutor(client, entry.task, {
-              timestamp: now,
-              notificationKind: entry.notificationKind ?? null,
-            });
-          if (row) {
-            rows.push(row);
+          if (!content && !statusUpdate) continue;
+          const status = statusUpdate?.status ?? 'pending';
+          const insertEntry = {
+            task: observation.task,
+            notificationKind: status === 'pending' ? notificationKind : null,
+            status,
+            completionOrigin: status === 'completed' && taskSource === 'classroom'
+              ? 'classroom'
+              : null,
+            completedAt: status === 'completed' ? now : null,
+            isCurrent: status === 'pending' ? 1 : 0,
+          };
+          // A restored tombstone is intentionally allowed to re-enter only
+          // after the provider reports a current, eligible pending status.
+          if (taskSource === 'classroom'
+            && restoredTombstones.has(externalId(observation.task))) {
+            insertEntry.allowInsert = true;
           }
+          missing.push(insertEntry);
         }
 
-        for (const update of normalizedStatusUpdates) {
-          await applyClassroomStatusUpdateWithExecutor(
-            client,
-            update,
-            now,
-            preserveNotificationIdentities,
-          );
+        const retiredExternalIds = await loadRetiredClassroomIds(
+          client,
+          missing.map(({ task }) => task),
+        );
+        const insertedRows = await insertManySeenTasksWithExecutor(client, missing, {
+          timestamp: now,
+          retiredExternalIds,
+        });
+        for (const row of insertedRows) {
+          rows.push(row);
+          presentIds.add(row.id);
+          inserted += 1;
+          if (row.notificationPending) notificationsQueued += 1;
+        }
+
+        let notCurrent = 0;
+        if (taskSource !== 'classroom' && snapshotComplete !== false) {
+          const parameters = [now, taskSource];
+          let exclusion = '';
+          if (presentIds.size > 0) {
+            const firstParameter = parameters.length + 1;
+            parameters.push(...presentIds);
+            exclusion = ` AND NOT (${parameterizedIn('id', [...presentIds], firstParameter)})`;
+          }
+          const sweep = await client.query(`
+            UPDATE homework_tasks
+            SET is_current = 0, updated_at = $1
+            WHERE source = $2 AND is_current = 1${exclusion}
+          `, parameters);
+          notCurrent = Number(sweep.rowCount ?? 0);
         }
 
         if (taskSource === 'classroom'
@@ -854,7 +1271,17 @@ export async function createPostgresHomeworkDatabase({
           && snapshotComplete !== false) {
           await setMetaWithExecutor(client, statusReconciliationMetaKey, now);
         }
-        return rows;
+        return {
+          rows,
+          inserted,
+          changed,
+          unchanged,
+          notCurrent,
+          statusTransitions,
+          notificationsQueued,
+          observed: [...observations.values()].filter(({ content }) => content).length,
+          currentExternalIds,
+        };
       });
     } catch (error) {
       throw new HomeworkDatabaseError(
@@ -891,7 +1318,7 @@ export async function createPostgresHomeworkDatabase({
   async function recordNotificationSuccess(id, timestamp) {
     const now = normalizeTimestampForStorage(timestamp ?? new Date());
     try {
-      await query(`
+      const result = await query(`
         UPDATE homework_tasks
         SET last_notified_at = $1,
             notification_pending = 0,
@@ -899,7 +1326,9 @@ export async function createPostgresHomeworkDatabase({
             updated_at = $2
         WHERE id = $3
       `, [now, now, Number(id)]);
-      return findById(id);
+      // The send path only needs an acknowledgement. Avoid fetching the full
+      // snapshot again after a successful Telegram request.
+      return Number(result.rowCount ?? 0) > 0;
     } catch (error) {
       throw wrapDatabaseError('Could not record PostgreSQL Telegram delivery', error);
     }
@@ -914,9 +1343,8 @@ export async function createPostgresHomeworkDatabase({
             notification_kind = NULL,
             updated_at = $1
         WHERE id = $2
-        RETURNING *
       `, [now, Number(id)]);
-      return rowToTask(result.rows[0]) ?? await findById(id);
+      return Number(result.rowCount ?? 0) > 0;
     } catch (error) {
       throw wrapDatabaseError('Could not clear PostgreSQL Telegram notification', error);
     }
@@ -938,9 +1366,9 @@ export async function createPostgresHomeworkDatabase({
             notification_kind = NULL,
             updated_at = $2
         WHERE id = $3
-        RETURNING *
+        RETURNING ${HOMEWORK_TASK_SELECT}
       `, [now, now, Number(id)]);
-      return rowToTask(result.rows[0]) ?? await findById(id);
+      return rowToTask(result.rows[0]);
     } catch (error) {
       throw wrapDatabaseError('Could not mark PostgreSQL homework as completed', error);
     }
@@ -963,7 +1391,7 @@ export async function createPostgresHomeworkDatabase({
             notification_kind = NULL,
             updated_at = $1
         WHERE id = $2 AND status = 'completed'
-        RETURNING *
+        RETURNING ${HOMEWORK_TASK_SELECT}
       `, [now, Number(id)]);
       return rowToTask(result.rows[0]);
     } catch (error) {

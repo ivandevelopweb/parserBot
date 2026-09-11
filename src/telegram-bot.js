@@ -14,6 +14,10 @@ import {
 import { ConfigError, errorMessage } from './utils.js';
 
 export const HOMEWORK_SYNC_INTERVAL_MS = 10 * 60 * 1000;
+export const DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES = 10;
+export const RENDER_HOMEWORK_SYNC_INTERVAL_MINUTES = 20;
+export const MIN_HOMEWORK_SYNC_INTERVAL_MINUTES = 5;
+export const MAX_HOMEWORK_SYNC_INTERVAL_MINUTES = 60;
 export const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
 const MAX_POLL_BACKOFF_MS = 30 * 1000;
 
@@ -45,6 +49,33 @@ function sleep(milliseconds, signal) {
 function parseInteger(value) {
   const parsed = Number(value);
   return Number.isInteger(parsed) && parsed >= 0 ? parsed : null;
+}
+
+export function parseHomeworkSyncIntervalMinutes(
+  value = process.env.HOMEWORK_SYNC_INTERVAL_MINUTES,
+) {
+  if (value === undefined || value === null || String(value).trim() === '') {
+    return DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES;
+  }
+  const text = String(value).trim();
+  if (!/^\d+$/u.test(text)) {
+    throw new ConfigError(
+      `HOMEWORK_SYNC_INTERVAL_MINUTES must be an integer from ${MIN_HOMEWORK_SYNC_INTERVAL_MINUTES} to ${MAX_HOMEWORK_SYNC_INTERVAL_MINUTES}`,
+    );
+  }
+  const minutes = Number(text);
+  if (!Number.isSafeInteger(minutes)
+    || minutes < MIN_HOMEWORK_SYNC_INTERVAL_MINUTES
+    || minutes > MAX_HOMEWORK_SYNC_INTERVAL_MINUTES) {
+    throw new ConfigError(
+      `HOMEWORK_SYNC_INTERVAL_MINUTES must be an integer from ${MIN_HOMEWORK_SYNC_INTERVAL_MINUTES} to ${MAX_HOMEWORK_SYNC_INTERVAL_MINUTES}`,
+    );
+  }
+  return minutes;
+}
+
+export function getSyncStaleAfterMs(syncIntervalMs) {
+  return Math.max(30 * 60 * 1000, Number(syncIntervalMs) * 2 + 5 * 60 * 1000);
 }
 
 function isConfiguredChat(chatId, allowedChatId) {
@@ -85,7 +116,7 @@ export function createTelegramBot({
   allowedChatId = process.env.TELEGRAM_CHAT_ID,
   syncFn = syncAllHomeworks,
   logger = console.log,
-  syncIntervalMs = HOMEWORK_SYNC_INTERVAL_MS,
+  syncIntervalMs = undefined,
   pollTimeoutSeconds = TELEGRAM_POLL_TIMEOUT_SECONDS,
   now = () => new Date(),
 } = {}) {
@@ -106,6 +137,10 @@ export function createTelegramBot({
   }
 
   const nowProvider = typeof now === 'function' ? now : () => new Date(now);
+  const effectiveSyncIntervalMs = syncIntervalMs === undefined
+    ? parseHomeworkSyncIntervalMinutes() * 60 * 1000
+    : syncIntervalMs;
+  const syncStaleAfterMs = getSyncStaleAfterMs(effectiveSyncIntervalMs);
   let stopped = true;
   let running = false;
   let syncInProgress = false;
@@ -114,6 +149,51 @@ export function createTelegramBot({
   let activeSyncPromise = null;
   let stopRequested = false;
   let awaitingClassroomAuthuser = false;
+  const syncDiagnostics = new Map();
+
+  function refreshSyncDiagnostics(result) {
+    const providers = Array.isArray(result?.providers)
+      ? result.providers
+      : result?.source
+        ? [result]
+        : [];
+    for (const provider of providers) {
+      if (!provider?.source) continue;
+      const current = syncDiagnostics.get(provider.source) ?? {};
+      syncDiagnostics.set(provider.source, {
+        ...current,
+        status: provider.status ?? current.status ?? 'unknown',
+        stage: provider.stage ?? current.stage ?? null,
+        attemptedAt: provider.attemptedAt ?? current.attemptedAt ?? null,
+        lastSuccessAt: provider.lastSuccessAt ?? current.lastSuccessAt ?? null,
+        taskCount: provider.taskCount ?? current.taskCount ?? null,
+        metrics: provider.metrics ?? current.metrics ?? null,
+      });
+    }
+  }
+
+  function getSyncDiagnostics() {
+    const result = {};
+    for (const source of ['eschool', 'classroom']) {
+      const state = syncDiagnostics.get(source) ?? {
+        status: 'unknown',
+        stage: null,
+        attemptedAt: null,
+        lastSuccessAt: null,
+        taskCount: null,
+        metrics: null,
+      };
+      const lastSuccessTime = state.lastSuccessAt
+        ? Date.parse(state.lastSuccessAt)
+        : Number.NaN;
+      const stale = state.status === 'skipped'
+        ? false
+        : !Number.isFinite(lastSuccessTime)
+          || Date.now() - lastSuccessTime > syncStaleAfterMs;
+      result[source] = { ...state, stale };
+    }
+    return result;
+  }
 
   async function runSync({ throwOnError = false } = {}) {
     if (stopRequested) {
@@ -128,7 +208,7 @@ export function createTelegramBot({
     syncInProgress = true;
     const syncPromise = (async () => {
       try {
-        return await syncFn({
+        const result = await syncFn({
           auth,
           database,
           telegram,
@@ -137,6 +217,8 @@ export function createTelegramBot({
           now: nowProvider(),
           signal: pollAbortController?.signal,
         });
+        refreshSyncDiagnostics(result);
+        return result;
       } catch (error) {
         if (stopRequested && isCancellationError(error)) {
           return null;
@@ -584,9 +666,9 @@ export function createTelegramBot({
       }
       syncTimer = setInterval(() => {
         void runSync();
-      }, syncIntervalMs);
+      }, effectiveSyncIntervalMs);
 
-      logger(`[bot] Homework sync interval: ${Math.round(syncIntervalMs / 60000)} minutes`);
+      logger(`[bot] Homework sync interval: ${Math.round(effectiveSyncIntervalMs / 60000)} minutes`);
       await pollLoop();
     } catch (error) {
       if (stopRequested && isCancellationError(error)) {
@@ -631,5 +713,6 @@ export function createTelegramBot({
     start,
     stop,
     isRunning: () => running,
+    getDiagnostics: getSyncDiagnostics,
   };
 }

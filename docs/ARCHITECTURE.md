@@ -37,7 +37,11 @@ The E-school login, diary access, Classroom API/web calls, and Telegram calls us
 Telegram update → telegram-bot → callback/command → PostgreSQL → edit message
 ```
 
-In `npm run bot` mode this flow starts once at process startup and then runs every 10 minutes. Telegram long polling runs in the same process. A provider failure is logged and does not prevent the other provider from running.
+In `npm run bot` mode this flow starts once at process startup and then runs
+every 10 minutes by default. `HOMEWORK_SYNC_INTERVAL_MINUTES` accepts an
+integer from 5 through 60; the Render profile sets 20. Telegram long polling
+runs in the same process. A provider failure is logged and does not prevent the
+other provider from running.
 
 ## 3. Layers and files
 
@@ -86,6 +90,13 @@ Cookies are not written to disk. They live in the current process's `tough-cooki
 
 The school and student ids are currently constants in `src/eschool.js`. That works for one account, but it is not a multi-user configuration.
 
+The Appointment adapter validates the response shape before returning it: an
+`Embed.TargetHomeworks` collection must be an array, each record must have a
+`TargetAppointmentId`, and the returned provider object carries
+`snapshotComplete: true`. An invalid or partial response raises a sync data
+error before PostgreSQL is initialized or swept. An empty valid array is a
+complete snapshot and therefore hides previously current E-school rows.
+
 When the API returns `401`, `403`, or a message that points to an expired session, the client tries one refresh through `/portal`. If that does not work, it performs a full login. There is no endless retry for one request.
 
 The E-school-only wrapper in `bot-sync.js` invalidates its process-local login
@@ -97,14 +108,21 @@ an outage. Classroom continues through its existing independent provider path.
 
 The wrapper stores a compact JSON diagnostic under `database_meta` key
 `eschool_sync_status`: attempt time, last successful snapshot time, task count,
-status, and stage. It stores no exception text, provider payload, or credentials.
-Metadata failures do not fail the provider. This uses the existing key/value
-table and requires no schema migration. A delivery failure has its own status;
-the snapshot success time still advances because persistence already succeeded.
-The bot CLI exposes these fields in GET `/healthz` with a 30-minute stale flag.
-HTTP readiness and HEAD behavior remain independent of provider health to avoid
-restarting Classroom because E-school is unavailable. The diagnostics survive a
-restart; before the first recorded cycle they report unknown/stale.
+status, and stage. The Classroom branch stores the corresponding compact
+`classroom_sync_status` value, including its metrics. These values contain no
+exception text, provider payload, or credentials and require no schema
+migration. A delivery failure has its own status; the snapshot success time
+still advances because persistence already succeeded.
+
+The bot also keeps the latest per-provider sync state in memory and exposes it
+through GET `/healthz`. Health GET and HEAD never read PostgreSQL, so frequent
+Render checks cannot wake compute or add a query. Before the first cycle each
+provider reports `unknown`/`stale`; the stale threshold is derived from the
+configured interval and is at least 30 minutes. Readiness and provider health
+remain independent, so an E-school or Classroom outage does not cause an
+application-side restart. Durable metadata remains useful for an operator
+after restart, but the health endpoint intentionally does not reload it on each
+request.
 
 ### Google Classroom
 
@@ -322,10 +340,13 @@ publishedAt (Classroom only)
 filesCount
 ```
 
-E-school change notifications compare the description, target date, topics, and
-other display fields. Classroom change notifications also compare title, due
-time, link, and file count; `updatedAt` alone is not a content change. A change
-to an E-school technical `homeworkId` alone does not create a notification.
+E-school change notifications compare subject, description, assigned/target
+dates, lesson/time, topics, links, and files. Classroom change notifications
+also compare title, due time, link, and file count; `updatedAt` alone is not a
+content change. The storage comparator is broader than the notification
+comparator: for example, a Classroom `updatedAt` refresh is persisted without
+notifying the user. A change to an E-school technical `homeworkId` alone does
+not create a notification.
 
 When the description changes, the fingerprint changes too. `findMatch()` first looks for the new fingerprint, then may find exactly one older row with the same `targetAppointmentId`. This keeps the local task id and avoids creating an extra row. If there is more than one candidate, the code does not merge them automatically.
 
@@ -358,6 +379,7 @@ and the old local SQLite file is neither read nor deleted.
 - `database_version` (current PostgreSQL schema version 5);
 - `baseline_initialized_at` for E-school and `baseline_initialized_at:classroom` for Classroom;
 - `classroom_status_reconciled_at`, written only after a complete, committed Classroom status pass;
+- `eschool_sync_status` and `classroom_sync_status`, compact provider success/diagnostic timestamps and metrics;
 - `classroom_authuser_index`, the optional Google account order for rendered Classroom links;
 - `telegram_update_offset`.
 
@@ -422,25 +444,46 @@ One provider cycle works like this:
    complete Classroom status reconciliation is also quiet and records
    `classroom_status_reconciled_at` in the same transaction.
 4. Build the full match plan before mutating PostgreSQL.
-5. In one PostgreSQL transaction, mark only E-school's previous rows
-   `is_current = 0`, upsert the new snapshot, apply known Classroom status
-   transitions by course-qualified external id, and set `notification_pending`
-   when a notification is needed. Classroom absence never sweeps rows.
-6. After commit, recheck each pending queue row and send one Telegram message
+5. Match E-school by batched source/external-id, fingerprint, and safe
+   appointment fallback queries; match Classroom content and status observations
+   in the same bounded plan.
+6. In one PostgreSQL transaction, persist only changed task fields, apply one
+   combined content/status mutation per Classroom id, and set
+   `notification_pending` when a notification is needed. For a complete
+   E-school snapshot, only rows absent from the resolved row-id set are marked
+   not current. Classroom absence never sweeps rows.
+7. After commit, recheck each pending queue row and send one Telegram message
    for each still-pending task. A completed row's stale notification is cleared
    without being counted as a delivery.
-7. Only after Telegram returns success, clear `notification_pending` and write
+8. Only after Telegram returns success, clear `notification_pending` and write
    `last_notified_at`.
 
 The repository methods are asynchronous because every read and write goes
-through PostgreSQL. The production path supplies all match results to the
-transaction, so the transaction contains database work only and never waits on
-provider or Telegram HTTP.
+through PostgreSQL. Matching uses bounded batches (250 ids per lookup); bulk
+baseline/new-row inserts are capped at 100 rows so PostgreSQL parameter limits
+are not approached. The production path supplies match results to the
+transaction, and the transaction performs only short database work: it never
+waits on provider or Telegram HTTP. `last_seen_at` advances when an observation
+causes a persisted content, status, or current-state change; unchanged scans
+therefore do not rewrite every row. `updated_at` advances only for an actual
+row mutation (including notification and user-status mutations).
 
 `syncAllHomeworks()` runs the E-school cycle and then the Classroom cycle. A
 provider fetch or delivery error is recorded in the result and logged, while
 the other provider still runs. Completed-task cleanup runs once after both
 cycles.
+
+Each provider result includes a bounded metrics object:
+`observed` is the number of eligible content tasks in the provider snapshot;
+`inserted` counts new task rows; `changed` counts observed rows whose stored
+identity or snapshot changed; `unchanged` counts observed rows with no stored
+content change; `notCurrent` counts E-school rows hidden by the complete-snapshot
+absence reconciliation; `statusTransitions` counts Classroom status changes;
+`notificationsQueued` counts newly set queue decisions; `notificationsSent`
+counts successful Telegram deliveries; and `durationMs` is wall-clock time for
+the provider cycle. Classroom content and status are unioned by its
+course-qualified external id, so one assignment cannot be counted twice.
+These application metrics are not Neon billing counters.
 
 Pending tasks are not removed by age. The 14-day rule applies only to completed tasks and uses `completed_at`, not the lesson date or publication date.
 
@@ -577,7 +620,26 @@ engine range is `>=24.21.0 <25`. The build test suite uses only
 temporary/in-memory PostgreSQL fixtures and does not authorize providers or
 send Telegram messages. An external monitor such as UptimeRobot may request
 `/healthz` to reduce free-service sleeping; configuring it is an operator task,
-not an application-side integration.
+not an application-side integration. The Blueprint sets
+`HOMEWORK_SYNC_INTERVAL_MINUTES=20`; the application default remains 10 and
+the accepted range is 5–60. A 20-minute run may delay discovery or a retry by
+one interval plus the sync duration, but reduces periodic provider/database
+work. Increasing this setting is not a substitute for the SQL batching and
+conditional-write changes above.
+
+#### Rollout and rollback
+
+The optimization keeps schema version 5 and requires no migration. Before a
+rollout, run `npm test` on Node 24.21+ and repeat the synthetic benchmark. In
+Render, stop the old `npm run bot` owner and verify its process chain has
+exited before starting the new revision; two long-polling owners cause a
+Telegram 409 conflict. Check a GET `/healthz`, provider state transitions from
+`unknown`, queue behavior, and task/status samples during the first cycles.
+For rollback, stop the new owner and restore the previous application revision
+with the same environment and PostgreSQL database. Do not delete, reset, or
+manually rewrite task/queue data. After 24–72 hours, compare Neon counters over
+an exact window together with missed/repeated notifications before tuning the
+interval.
 
 ## 9. Security and privacy
 
@@ -649,6 +711,23 @@ in-place SQLite migration. The bot does not read or delete the old local
 SQLite file. An optional validated `data/state.json` import preserves the
 previous JSON baseline without making a file the active store.
 
+### Neon measurement and optimization limits
+
+The repository benchmark in `scripts/neon-optimization-benchmark.mjs` uses the
+same 120-task synthetic E-school/Classroom dataset for before/after runs. It
+counts SQL calls, returned rows, changed rows, and UTF-8 JSON sizes of returned
+rows. The last value is deliberately labeled approximate: it excludes protocol
+framing and is not the Neon network-transfer counter. Production savings must
+be checked after deployment using the same observation window and Neon
+dashboard counters; a local pg-mem result cannot prove a CU-hour or GB result.
+
+The active path batches identity matching, combines Classroom content/status
+writes, bulk-inserts baseline/new rows within bounded parameter limits, and
+avoids unchanged per-task updates. The queue remains durable in PostgreSQL and
+health checks use in-memory state, so there is no durable task cache that could
+stale callbacks or restart recovery. No schema migration is required for this
+optimization; version 5 remains the current schema.
+
 ### Long polling instead of a webhook
 
 The Web Service exposes only a small `/healthz` endpoint for Render and
@@ -686,7 +765,8 @@ Before a large change, decide how to handle these items:
 - decide whether access should be per user or per chat;
 - add an idempotent outbox or Telegram message id if duplicates become a problem;
 - add fixture tests for changes in the diary response;
-- add a per-provider health/status view for operations;
+- validate the in-memory per-provider health diagnostics and stale threshold
+  against real Render restarts;
 - move the Classroom home/course-list wire decoder behind a versioned adapter if
   Google changes the internal RPC;
 - investigate the route-dependent pONvgf/detail RPCs and compare all relevant

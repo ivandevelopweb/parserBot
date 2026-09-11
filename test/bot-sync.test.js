@@ -438,6 +438,38 @@ test('bot sends an update for a changed description', async () => {
   }
 });
 
+test('E-school display-field changes notify while the normalized snapshot stays deduplicated', async () => {
+  const context = await createTestContext();
+  const messages = [];
+
+  try {
+    const original = homework();
+    await syncBotHomeworks(options(
+      context,
+      [original],
+      async (...args) => messages.push(args),
+    ));
+    const changed = homework({
+      subject: 'Геометрія',
+      assignedDate: '2026-09-10',
+      lessonNumber: 5,
+      startTime: '12:00',
+    });
+    const result = await syncBotHomeworks(options(
+      context,
+      [changed],
+      async (...args) => messages.push(args),
+    ));
+
+    assert.equal(result.updatedTasks, 1);
+    assert.equal(messages.length, 1);
+    assert.equal((await context.database.count()), 1);
+    assert.equal((await context.database.currentTasks())[0].snapshot.subject, 'Геометрія');
+  } finally {
+    await context.close();
+  }
+});
+
 test('Telegram failure leaves one task pending without hiding the saved snapshot', async () => {
   const context = await createTestContext();
   const newTask = homework({ targetAppointmentId: 185142, description: 'Нове завдання' });
@@ -467,6 +499,41 @@ test('Telegram failure leaves one task pending without hiding the saved snapshot
     assert.equal((await context.database.currentTasks()).length, 3);
     assert.equal(result.sentTasks, 1);
     assert.equal(result.deliveryErrors, 1);
+  } finally {
+    await context.close();
+  }
+});
+
+test('incomplete E-school provider snapshots fail before the current-state sweep', async () => {
+  const context = await createTestContext();
+  const existing = toSyncTask(homework());
+
+  try {
+    await syncProviderHomeworks({
+      source: 'eschool',
+      fetchTasksFn: async () => ({ homeworkTasks: [homework()], snapshotComplete: true }),
+      database: context.database,
+      legacyStateStore: null,
+      sendMessageFn: async () => {},
+      logger: () => {},
+      now: FIXED_NOW,
+    });
+    const before = await context.database.findMatch(existing);
+    await assert.rejects(
+      syncProviderHomeworks({
+        source: 'eschool',
+        fetchTasksFn: async () => ({ homeworkTasks: [], snapshotComplete: false }),
+        database: context.database,
+        legacyStateStore: null,
+        sendMessageFn: async () => {},
+        logger: () => {},
+        now: new Date('2026-09-09T13:00:00.000Z'),
+      }),
+      (error) => error.code === 'SYNC_DATA_ERROR',
+    );
+    const after = await context.database.findMatch(existing);
+    assert.equal(after.isCurrent, before.isCurrent);
+    assert.equal(after.updatedAt, before.updatedAt);
   } finally {
     await context.close();
   }
@@ -909,6 +976,10 @@ test('Classroom ignores updatedAt-only changes, notifies content changes, and se
       classroomResult([{ task: original, status: 'pending' }]),
       async (...args) => messages.push(args),
     ));
+    const beforeUnchanged = await context.database.findByExternalId(
+      original.externalId,
+      'classroom',
+    );
     const timestampOnly = classroomHomework({
       updatedAt: '2026-09-09T11:00:00.000Z',
     });
@@ -920,6 +991,12 @@ test('Classroom ignores updatedAt-only changes, notifies content changes, and se
     ));
     assert.equal(unchanged.updatedTasks, 0);
     assert.equal(messages.length, 0);
+    const afterUnchanged = await context.database.findByExternalId(
+      original.externalId,
+      'classroom',
+    );
+    assert.notEqual(afterUnchanged.lastSeenAt, beforeUnchanged.lastSeenAt);
+    assert.notEqual(afterUnchanged.updatedAt, beforeUnchanged.updatedAt);
 
     const contentChanged = classroomHomework({
       description: 'Опрацювати оновлений параграф',

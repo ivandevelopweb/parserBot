@@ -7,7 +7,6 @@ import { startHealthServer } from './health-server.js';
 import { createTelegramBot } from './telegram-bot.js';
 import { createTelegramClient, DEFAULT_TELEGRAM_TIMEOUT_MS } from './telegram.js';
 import { errorMessage } from './utils.js';
-import { ESCHOOL_SYNC_META_KEY } from './bot-sync.js';
 
 async function main() {
   const auth = createAuthClient();
@@ -42,18 +41,7 @@ async function main() {
     healthServer = process.env.PORT
       ? await startHealthServer({
         readiness: () => !shuttingDown,
-        diagnostics: async () => {
-          const state = JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY) || 'null');
-          return { eschool: state ? {
-            status: state.status,
-            stage: state.stage,
-            attemptedAt: state.attemptedAt,
-            lastSuccessAt: state.lastSuccessAt,
-            taskCount: state.taskCount,
-            stale: !state.lastSuccessAt
-              || Date.now() - Date.parse(state.lastSuccessAt) > 30 * 60 * 1000,
-          } : { status: 'unknown', stale: true } };
-        },
+        diagnostics: () => bot.getDiagnostics(),
       })
       : null;
     await bot.start();

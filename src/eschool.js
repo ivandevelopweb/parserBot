@@ -221,25 +221,60 @@ function extractAppointmentArray(payload) {
   );
 }
 
+function validateAppointmentSnapshot(appointments) {
+  if (!Array.isArray(appointments)) {
+    throw new SmokeTestError(
+      'Appointment API returned an invalid appointment snapshot',
+      { code: 'APPOINTMENT_RESPONSE_ERROR' },
+    );
+  }
+
+  for (const appointment of appointments) {
+    if (!appointment || typeof appointment !== 'object') {
+      throw new SmokeTestError(
+        'Appointment API returned an invalid appointment record',
+        { code: 'APPOINTMENT_RESPONSE_ERROR' },
+      );
+    }
+    if (!Object.prototype.hasOwnProperty.call(appointment, 'Embed')) {
+      continue;
+    }
+    if (!appointment.Embed || typeof appointment.Embed !== 'object'
+      || Array.isArray(appointment.Embed)
+      || !Object.prototype.hasOwnProperty.call(appointment.Embed, 'TargetHomeworks')
+      || !Array.isArray(appointment.Embed.TargetHomeworks)) {
+      throw new SmokeTestError(
+        'Appointment API returned an invalid TargetHomeworks collection',
+        { code: 'APPOINTMENT_RESPONSE_ERROR' },
+      );
+    }
+    for (const homework of appointment.Embed.TargetHomeworks) {
+      if (!homework || typeof homework !== 'object'
+        || String(homework.TargetAppointmentId ?? '').trim() === '') {
+        throw new SmokeTestError(
+          'Appointment API returned homework without TargetAppointmentId',
+          { code: 'APPOINTMENT_RESPONSE_ERROR' },
+        );
+      }
+    }
+  }
+}
+
 function toFilesCount(value) {
   const number = Number(value);
   return Number.isFinite(number) && number >= 0 ? number : 0;
 }
 
 export function collectHomeworkRecords(appointments) {
+  validateAppointmentSnapshot(appointments);
   const records = [];
 
   for (const appointment of appointments) {
-    const targetHomeworks = appointment?.Embed?.TargetHomeworks;
-    if (!Array.isArray(targetHomeworks)) {
+    if (!Object.prototype.hasOwnProperty.call(appointment, 'Embed')) {
       continue;
     }
-
+    const targetHomeworks = appointment?.Embed?.TargetHomeworks;
     for (const homework of targetHomeworks) {
-      if (!homework || typeof homework !== 'object') {
-        continue;
-      }
-
       records.push({
         homeworkId: homework.Id,
         targetAppointmentId: homework.TargetAppointmentId,
@@ -269,6 +304,12 @@ export function deduplicateHomeworkRecords(appointmentsOrRecords) {
 
   for (const record of records) {
     const targetAppointmentId = String(record.targetAppointmentId ?? '');
+    if (!targetAppointmentId.trim()) {
+      throw new SmokeTestError(
+        'E-school homework record is missing TargetAppointmentId',
+        { code: 'APPOINTMENT_RESPONSE_ERROR' },
+      );
+    }
     const normalizedDescription = normalizeDescription(record.description);
     const key = `${targetAppointmentId}\u0000${normalizedDescription}`;
 
@@ -361,7 +402,9 @@ async function requestAppointments(auth, url, { forceDiarySession = false, signa
   }
 
   try {
-    return extractAppointmentArray(JSON.parse(responseText));
+    const appointments = extractAppointmentArray(JSON.parse(responseText));
+    validateAppointmentSnapshot(appointments);
+    return appointments;
   } catch (error) {
     if (error instanceof SmokeTestError) {
       throw error;
@@ -467,6 +510,7 @@ export async function getAppointments(
     rawHomeworks,
     homeworkTasks,
     homeworks,
+    snapshotComplete: true,
   };
 }
 

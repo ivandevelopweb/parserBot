@@ -138,7 +138,50 @@ test('getAppointments requests the current and next week by default', async () =
     rawHomeworks: [],
     homeworkTasks: [],
     homeworks: [],
+    snapshotComplete: true,
   });
+});
+
+test('getAppointments rejects an incomplete E-school homework collection before sync can mutate storage', async () => {
+  const auth = {
+    async fetch(url) {
+      if (String(url).endsWith('/api/v1/seplogin')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+      return new Response(JSON.stringify({ Appointment: [
+        { Subject: 'Алгебра', Embed: { TargetHomeworks: {} } },
+      ] }), { status: 200 });
+    },
+    async getCookieValue(name) {
+      return name === 'application_token' ? 'already-bound' : null;
+    },
+  };
+
+  await assert.rejects(
+    getAppointments(auth, { logger: () => {} }),
+    (error) => error.code === 'APPOINTMENT_RESPONSE_ERROR',
+  );
+});
+
+test('E-school deduplication rejects records without the appointment identity', async () => {
+  await assert.rejects(
+    getAppointments({
+      async fetch(url) {
+        if (String(url).endsWith('/api/v1/seplogin')) {
+          return new Response(JSON.stringify({ ok: true }), { status: 200 });
+        }
+        return new Response(JSON.stringify({ Appointment: [
+          { Subject: 'Алгебра', Embed: { TargetHomeworks: [
+            { Id: 1, Description: 'Прочитати' },
+          ] } },
+        ] }), { status: 200 });
+      },
+      async getCookieValue(name) {
+        return name === 'application_token' ? 'already-bound' : null;
+      },
+    }, { logger: () => {} }),
+    (error) => error.code === 'APPOINTMENT_RESPONSE_ERROR',
+  );
 });
 
 test('getAppointments refreshes once and retries an expired session', async () => {

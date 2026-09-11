@@ -1538,7 +1538,7 @@ function hasRecognizedCourseWorkCollection(value, courseId, seen = new Set(), de
     }
     if (value[0] === 'hrq.cus' && Array.isArray(value[2])) {
       return value[2].length === 0
-        || value[2].some((record) => normalizeCourseWorkArray(record, courseId));
+        || value[2].every((record) => normalizeCourseWorkArray(record, courseId));
     }
     if (value.length > 0 && value.every((record) => normalizeCourseWorkArray(record, courseId))) {
       return true;
@@ -1550,7 +1550,7 @@ function hasRecognizedCourseWorkCollection(value, courseId, seen = new Set(), de
     const normalizedKey = key.toLowerCase();
     if (['coursework', 'assignments', 'items'].includes(normalizedKey)
       && Array.isArray(child)) {
-      return child.length === 0 || child.some((item) => (
+      return child.length === 0 || child.every((item) => (
         normalizeCourseWorkObject(item, courseId, true)
         || normalizeCourseWorkArray(item, courseId)
       ));
