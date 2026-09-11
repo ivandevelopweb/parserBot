@@ -155,6 +155,22 @@ the root path `/` returns 404. Both health methods return 200 when ready or
 not the success of provider sync or Telegram polling. Configuring the monitor
 is an operational step outside this repository.
 
+The GET `/healthz` response also includes `sync.eschool`: the latest attempt,
+last successful snapshot time, task count, status, and failure stage (`login`,
+`appointments`, `snapshot`, or `delivery`). `stale` is true when no successful
+snapshot is known or it is older than 30 minutes. Delivery errors are reported
+separately from successful snapshot storage. These diagnostics contain no task
+text or credentials and do not change the process readiness HTTP status.
+HEAD remains a process-only check. A metadata read failure reports diagnostics
+as unavailable; it does not change readiness.
+
+After an E-school login or appointment-read failure, the next scheduled cycle
+performs a full login instead of trusting the previous session. The existing
+bounded recovery within a request remains unchanged. Classroom authentication,
+filters, status reconciliation, and delivery are unchanged. This prevents a
+failed session from being reused indefinitely; deployment logs are still needed
+to identify the original cause of a particular outage.
+
 On the first run, the existing archive is not sent. It becomes the baseline. If
 an older `data/state.json` already exists, its baseline is imported into
 PostgreSQL without sending duplicate notifications. The JSON file is only a

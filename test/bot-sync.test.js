@@ -2,13 +2,93 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 
 import { createEmptyState } from '../src/state.js';
-import { syncAllHomeworks, syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
+import { ESCHOOL_SYNC_META_KEY, syncAllHomeworks, syncBotHomeworks, syncProviderHomeworks } from '../src/bot-sync.js';
 import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createPostgresHomeworkDatabase } from '../src/postgres-homework-db.js';
 import { toSyncTask } from '../src/sync.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 const FIXED_NOW = new Date('2026-09-09T12:00:00.000Z');
+
+test('E-school read failure allows Classroom and forces one login on the next cycle', async () => {
+  const { database } = await createTestDatabase();
+  let logins = 0;
+  let reads = 0;
+  let classroomReads = 0;
+  let failing = false;
+  let addedHomework = false;
+  const deliveries = [];
+  const auth = { fullLogin: async () => { logins += 1; } };
+  const options = {
+    auth, database, legacyStateStore: null, logger: () => {}, now: FIXED_NOW,
+    sendMessageFn: async (_message, { task }) => { deliveries.push(task); },
+    getAppointmentsFn: async (_auth, { now }) => {
+      assert.equal(now, FIXED_NOW);
+      reads += 1;
+      if (failing) throw new Error('unrecognized session failure: private value');
+      return { homeworkTasks: [homework(), ...(addedHomework ? [homework({
+        targetAppointmentId: 999999, homeworkId: 999998, subject: 'English',
+        description: 'New assignment after session recovery',
+      })] : [])] };
+    },
+    getClassroomHomeworksFn: async () => {
+      classroomReads += 1;
+      return [classroomHomework()];
+    },
+  };
+  try {
+    await syncAllHomeworks(options);
+    const classroomBefore = await database.findMatch(classroomHomework());
+    failing = true;
+    const failed = await syncAllHomeworks(options);
+    assert.equal(failed.failedProviders.length, 1);
+    assert.equal(failed.failedProviders[0].source, 'eschool');
+    assert.equal(logins, 1);
+    assert.equal(reads, 2);
+    const state = JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY));
+    assert.deepEqual(state, {
+      attemptedAt: FIXED_NOW.toISOString(), lastSuccessAt: FIXED_NOW.toISOString(),
+      taskCount: 1, status: 'error', stage: 'appointments',
+    });
+    assert.equal((await database.currentTasks()).length, 2);
+    failing = false;
+    addedHomework = true;
+    await syncAllHomeworks(options);
+    await syncAllHomeworks(options);
+    assert.equal(logins, 2);
+    assert.equal(classroomReads, 4);
+    assert.equal(deliveries.length, 1);
+    assert.equal(deliveries[0].snapshot.subject, 'English');
+    assert.equal((await database.pendingNotifications('eschool')).length, 0);
+    assert.deepEqual(await database.findMatch(classroomHomework()), classroomBefore);
+    assert.equal(JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY)).status, 'ok');
+  } finally { await database.close(); }
+});
+
+test('E-school login failure is diagnosed and metadata write failure does not block sync', async () => {
+  const { database } = await createTestDatabase();
+  let failing = true;
+  let reads = 0;
+  const options = {
+    auth: { fullLogin: async () => { if (failing) throw new Error('login unavailable'); } },
+    database, legacyStateStore: null, logger: () => {}, now: FIXED_NOW,
+    sendMessageFn: async () => {},
+    getAppointmentsFn: async () => { reads += 1; return { homeworkTasks: [homework()] }; },
+  };
+  try {
+    await assert.rejects(syncBotHomeworks(options), /login unavailable/);
+    assert.equal(reads, 0);
+    assert.equal(JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY)).stage, 'login');
+    failing = false;
+    const setMeta = database.setMeta;
+    database.setMeta = async (key, value) => {
+      if (key === ESCHOOL_SYNC_META_KEY) throw new Error('diagnostics unavailable');
+      return setMeta(key, value);
+    };
+    assert.equal((await syncBotHomeworks(options)).status, 'ok');
+    assert.equal((await database.currentTasks()).length, 1);
+  } finally { await database.close(); }
+});
 
 function homework(overrides = {}) {
   return {

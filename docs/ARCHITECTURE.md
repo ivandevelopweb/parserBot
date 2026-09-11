@@ -88,6 +88,24 @@ The school and student ids are currently constants in `src/eschool.js`. That wor
 
 When the API returns `401`, `403`, or a message that points to an expired session, the client tries one refresh through `/portal`. If that does not work, it performs a full login. There is no endless retry for one request.
 
+The E-school-only wrapper in `bot-sync.js` invalidates its process-local login
+marker after any login or Appointment read failure. The next scheduled cycle
+therefore starts with a full login, even if the previous error was not recognized
+as session expiration. It adds no immediate request retries and does not reset
+authentication on storage errors. Cancellation is propagated without recording
+an outage. Classroom continues through its existing independent provider path.
+
+The wrapper stores a compact JSON diagnostic under `database_meta` key
+`eschool_sync_status`: attempt time, last successful snapshot time, task count,
+status, and stage. It stores no exception text, provider payload, or credentials.
+Metadata failures do not fail the provider. This uses the existing key/value
+table and requires no schema migration. A delivery failure has its own status;
+the snapshot success time still advances because persistence already succeeded.
+The bot CLI exposes these fields in GET `/healthz` with a 30-minute stale flag.
+HTTP readiness and HEAD behavior remain independent of provider health to avoid
+restarting Classroom because E-school is unavailable. The diagnostics survive a
+restart; before the first recorded cycle they report unknown/stale.
+
 ### Google Classroom
 
 The supported Classroom path is the authenticated browser-cookie web/RPC

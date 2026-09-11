@@ -14,6 +14,7 @@ export async function startHealthServer({
   port = process.env.PORT,
   host = '0.0.0.0',
   readiness = () => true,
+  diagnostics,
 } = {}) {
   if (port === undefined || port === null || String(port).trim() === '') {
     throw new Error('PORT is required for the Render web service');
@@ -35,12 +36,20 @@ export async function startHealthServer({
       ready = false;
     }
 
+    let details;
+    if (diagnostics && request.method === 'GET') {
+      try {
+        details = await diagnostics();
+      } catch {
+        details = { status: 'unavailable' };
+      }
+    }
     response.statusCode = ready ? 200 : 503;
     response.setHeader('cache-control', 'no-store');
     response.setHeader('content-type', 'application/json; charset=utf-8');
     response.end(request.method === 'HEAD'
       ? undefined
-      : JSON.stringify({ status: ready ? 'ok' : 'unavailable' }));
+      : JSON.stringify({ status: ready ? 'ok' : 'unavailable', ...(details ? { sync: details } : {}) }));
   });
 
   await new Promise((resolve, reject) => {

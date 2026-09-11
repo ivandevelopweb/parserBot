@@ -19,6 +19,61 @@ export const ESCHOOL_SOURCE = 'eschool';
 export const CLASSROOM_SOURCE = 'classroom';
 
 const loggedInEschoolClients = new WeakSet();
+export const ESCHOOL_SYNC_META_KEY = 'eschool_sync_status';
+
+async function syncEschool({ auth, getAppointmentsFn, database, logger, now, signal, ...options }) {
+  const attemptedAt = new Date(now).toISOString();
+  let stage = 'login';
+  let previous = {};
+  try {
+    previous = JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY) || '{}');
+  } catch {
+    // Diagnostics must not prevent homework synchronization.
+  }
+  const saveStatus = async (status) => {
+    try {
+      await database.setMeta(ESCHOOL_SYNC_META_KEY, JSON.stringify(status));
+    } catch {
+      logger('[eschool] Could not persist sync diagnostics');
+    }
+  };
+  try {
+    const result = await syncProviderHomeworks({
+      ...options, database, logger, now, signal, source: ESCHOOL_SOURCE,
+      fetchTasksFn: async (requestSignal) => {
+        try {
+          await ensureEschoolAuth(auth, requestSignal);
+          stage = 'appointments';
+          const result = await getAppointmentsFn(auth, { signal: requestSignal, now, logger });
+          stage = 'snapshot';
+          return result;
+        } catch (error) {
+          // An unrecognized session failure must not pin every future cycle
+          // to the same client session. Retry login only on the next cycle.
+          loggedInEschoolClients.delete(auth);
+          throw error;
+        }
+      },
+    });
+    const status = {
+      attemptedAt, lastSuccessAt: attemptedAt, taskCount: result.taskCount,
+      status: result.deliveryErrors ? 'delivery_error' : 'ok',
+      stage: result.deliveryErrors ? 'delivery' : null,
+    };
+    await saveStatus(status);
+    logger(`[eschool] Sync status: ${status.status}; tasks: ${status.taskCount}; last success: ${attemptedAt}`);
+    return result;
+  } catch (error) {
+    if (!signal?.aborted) {
+      await saveStatus({
+        attemptedAt, lastSuccessAt: previous?.lastSuccessAt ?? null,
+        taskCount: previous?.taskCount ?? null, status: 'error', stage,
+      });
+      logger(`[eschool] Sync failed at stage: ${stage}; last success: ${previous?.lastSuccessAt ?? 'unknown'}`);
+    }
+    throw error;
+  }
+}
 
 function throwIfAborted(signal) {
   if (!signal?.aborted) {
@@ -504,12 +559,9 @@ export async function syncBotHomeworks({
     throw new SmokeTestError('syncBotHomeworks requires a Telegram sendMessage function');
   }
 
-  const result = await syncProviderHomeworks({
-    source: ESCHOOL_SOURCE,
-    fetchTasksFn: async (requestSignal) => {
-      await ensureEschoolAuth(auth, requestSignal);
-      return getAppointmentsFn(auth, { signal: requestSignal });
-    },
+  const result = await syncEschool({
+    auth,
+    getAppointmentsFn,
     database,
     legacyStateStore,
     sendMessageFn: sendMessage,
@@ -549,12 +601,9 @@ export async function syncAllHomeworks({
   const providers = [];
 
   try {
-    providers.push(await syncProviderHomeworks({
-      source: ESCHOOL_SOURCE,
-      fetchTasksFn: async (requestSignal) => {
-        await ensureEschoolAuth(auth, requestSignal);
-        return getAppointmentsFn(auth, { signal: requestSignal });
-      },
+    providers.push(await syncEschool({
+      auth,
+      getAppointmentsFn,
       database,
       legacyStateStore,
       sendMessageFn: sendMessage,

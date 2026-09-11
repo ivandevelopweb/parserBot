@@ -8,6 +8,31 @@ async function get(server, path) {
   return fetch(`http://127.0.0.1:${address.port}${path}`);
 }
 
+test('sync diagnostics report degradation without changing process readiness', async () => {
+  let fail = false;
+  const server = await startHealthServer({
+    port: 0, host: '127.0.0.1',
+    diagnostics: () => {
+      if (fail) throw new Error('private database error');
+      return { eschool: { status: 'error', stage: 'appointments', stale: true } };
+    },
+  });
+  try {
+    const response = await get(server, HEALTH_PATH);
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).sync.eschool.stage, 'appointments');
+    fail = true;
+    const failed = await get(server, HEALTH_PATH);
+    assert.equal(failed.status, 200);
+    assert.deepEqual(await failed.json(), { status: 'ok', sync: { status: 'unavailable' } });
+    const head = await fetch(`http://127.0.0.1:${server.server.address().port}${HEALTH_PATH}`, { method: 'HEAD' });
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), '');
+  } finally {
+    await server.close();
+  }
+});
+
 test('health server exposes a quiet 200 health endpoint and rejects other paths', async () => {
   const server = await startHealthServer({
     port: 0,
