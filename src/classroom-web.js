@@ -1237,6 +1237,22 @@ function normalizeTimestamp(value) {
     const date = new Date(milliseconds);
     return Number.isNaN(date.getTime()) ? String(value) : date.toISOString();
   }
+  if (Array.isArray(value)) {
+    const year = Number(value[0]);
+    const month = Number(value[1]);
+    const day = Number(value[2]);
+    if (![year, month, day].every(Number.isInteger)
+      || month < 1 || month > 12 || day < 1 || day > 31) {
+      return null;
+    }
+    const date = new Date(Date.UTC(year, month - 1, day));
+    return Number.isNaN(date.getTime())
+      || date.getUTCFullYear() !== year
+      || date.getUTCMonth() !== month - 1
+      || date.getUTCDate() !== day
+      ? null
+      : date.toISOString().slice(0, 10);
+  }
   if (typeof value === 'object' && value) {
     if (hasValue(value.seconds)) {
       return normalizeTimestamp(Number(value.seconds) * 1000);
@@ -1346,8 +1362,9 @@ function normalizeCourseWorkObject(object, courseId, isCourseWorkContext) {
  * The current pONvgf response is an array-only wire format. These are the
  * only response positions used by the array decoder, all confirmed in the
  * captured live response: identity[0], identity[1][0], record[5], the plain
- * description at record[27][0][6][1], and the optional due tuple at
- * record[9][4]. Unknown numeric positions are deliberately ignored.
+ * description at record[27][0][6][1], and the optional due value at
+ * record[9][4]. Due values may be timestamps or date-only [year, month, day]
+ * tuples; unknown numeric positions are deliberately ignored.
  */
 function normalizeCourseWorkArray(record, courseId) {
   if (!Array.isArray(record) || record.length < 28 || !Array.isArray(record[0])) {

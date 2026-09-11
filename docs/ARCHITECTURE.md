@@ -120,7 +120,8 @@ runtime, and the state filter is written to the confirmed protobuf position
 can explicitly request the turned-in route and another verified state set. The
 decoder supports both explicit coursework object fields and the array-only
 shape confirmed in the live response: the course-qualified identity pair,
-title, plain description, and optional due tuple. It does not guess the meaning
+title, plain description, and optional due value. Due values can be a timestamp
+or a date-only `[year, month, day]` tuple; the decoder does not guess the meaning
 of other numeric positions or material arrays. When the decoded response
 contains the confirmed opaque continuation field at `payload[1][1][0]`, the
 client sends another request with that value and stops when the field is

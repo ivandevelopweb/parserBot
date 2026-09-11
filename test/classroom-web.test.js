@@ -849,6 +849,28 @@ test('coursework decoder extracts the confirmed array-only pONvgf record shape',
   );
 });
 
+test('coursework decoder extracts a date-only due tuple', () => {
+  const record = Array(28).fill(null);
+  record[0] = ['878109743042', ['544644036115']];
+  record[2] = Date.parse('2026-09-09T09:00:00Z');
+  record[5] = 'Завдання зі строком 17';
+  record[9] = [2, ['stream-2'], Date.parse('2026-09-09T09:00:00Z'), null, [2026, 9, 17], 4];
+
+  assert.deepEqual(
+    decodeCourseWorkPayload([record], { courseId: '544644036115' }),
+    [{
+      source: 'classroom',
+      courseId: '544644036115',
+      assignmentId: '878109743042',
+      title: 'Завдання зі строком 17',
+      description: '',
+      dueAt: '2026-09-17',
+      updatedAt: '2026-09-09T09:00:00.000Z',
+      attachments: [],
+    }],
+  );
+});
+
 test('coursework decoder does not invent assignments from unknown numeric arrays', () => {
   const decoded = decodeCourseWorkPayload(
     [[100, null, 1, 0], [[1, 2, 3, 4]]],

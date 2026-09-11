@@ -260,7 +260,8 @@ with the same Classroom id and `updatedAt` are merged so a sparse scan cannot
 erase a due date or link from a richer one. The first successful
 Classroom sync creates a provider-specific baseline and status reconciliation
 without sending existing tasks as new. Classroom due timestamps are converted
-to `Europe/Kyiv`; tasks without a due date sort last and are labeled `Дата
+to `Europe/Kyiv`, while date-only due tuples are preserved as calendar dates;
+tasks without a due date sort last and are labeled `Дата
 здачі не вказана`. Its debug inspector
 examines the raw `wrb.fr` frames before nested JSON decoding and recursively
 walks every decoded array, object, and nested JSON string, so a raw JSON
