@@ -30,7 +30,7 @@ async function main() {
   const result = await getAppointments(auth);
 
   if (result.homeworks.length === 0) {
-    console.log('\nNo homework found for the current week.');
+    console.log('\nNo homework found for the current or next week.');
     return;
   }
 

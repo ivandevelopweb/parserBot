@@ -6,6 +6,7 @@ import {
   buildHomeworkWebUrl,
   deduplicateHomeworks,
   getAppointments,
+  getCurrentAndNextWeekRange,
   getCurrentWeekRange,
 } from '../src/eschool.js';
 
@@ -27,6 +28,13 @@ test('getCurrentWeekRange uses the Kyiv calendar date', () => {
   assert.deepEqual(
     getCurrentWeekRange(new Date('2026-09-06T22:30:00.000Z')),
     { start: '2026-09-07', end: '2026-09-13' },
+  );
+});
+
+test('getCurrentAndNextWeekRange covers two Kyiv calendar weeks', () => {
+  assert.deepEqual(
+    getCurrentAndNextWeekRange(new Date('2026-09-09T12:00:00.000Z')),
+    { start: '2026-09-07', end: '2026-09-20' },
   );
 });
 
@@ -93,6 +101,44 @@ test('deduplicateHomeworks groups by target appointment and normalized descripti
   assert.equal(result[0].description, 'Вивчити\nконспект  №11');
   assert.equal(result[1].homeworkId, 103);
   assert.equal(result[1].topic, 'Інша тема');
+});
+
+test('getAppointments requests the current and next week by default', async () => {
+  const appointmentUrls = [];
+  const auth = {
+    async fetch(url) {
+      const textUrl = String(url);
+      if (textUrl.endsWith('/api/v1/seplogin')) {
+        return new Response(JSON.stringify({ ok: true }), { status: 200 });
+      }
+
+      appointmentUrls.push(new URL(textUrl));
+      return new Response(JSON.stringify({ Appointment: [] }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    },
+    async getCookieValue(name) {
+      return name === 'application_token' ? 'already-bound' : null;
+    },
+  };
+
+  const result = await getAppointments(auth, {
+    now: new Date('2026-09-09T12:00:00.000Z'),
+    logger: () => {},
+  });
+
+  assert.equal(appointmentUrls.length, 1);
+  assert.equal(appointmentUrls[0].searchParams.get('start'), '2026-09-07');
+  assert.equal(appointmentUrls[0].searchParams.get('end'), '2026-09-20');
+  assert.deepEqual(result, {
+    start: '2026-09-07',
+    end: '2026-09-20',
+    appointments: [],
+    rawHomeworks: [],
+    homeworkTasks: [],
+    homeworks: [],
+  });
 });
 
 test('getAppointments refreshes once and retries an expired session', async () => {

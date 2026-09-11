@@ -41,7 +41,7 @@ function formatUtcDate(date) {
   return date.toISOString().slice(0, 10);
 }
 
-export function getCurrentWeekRange(now = new Date(), timeZone = TIME_ZONE) {
+function getCurrentWeekStartDate(now, timeZone) {
   const { year, month, day } = getDatePartsInTimeZone(now, timeZone);
   const localDate = new Date(Date.UTC(year, month - 1, day));
   const dayOfWeek = localDate.getUTCDay();
@@ -50,13 +50,25 @@ export function getCurrentWeekRange(now = new Date(), timeZone = TIME_ZONE) {
   const startDate = new Date(localDate);
   startDate.setUTCDate(startDate.getUTCDate() - daysFromMonday);
 
+  return startDate;
+}
+
+function buildWeekRange(startDate, numberOfDays) {
   const endDate = new Date(startDate);
-  endDate.setUTCDate(endDate.getUTCDate() + 6);
+  endDate.setUTCDate(endDate.getUTCDate() + numberOfDays - 1);
 
   return {
     start: formatUtcDate(startDate),
     end: formatUtcDate(endDate),
   };
+}
+
+export function getCurrentWeekRange(now = new Date(), timeZone = TIME_ZONE) {
+  return buildWeekRange(getCurrentWeekStartDate(now, timeZone), 7);
+}
+
+export function getCurrentAndNextWeekRange(now = new Date(), timeZone = TIME_ZONE) {
+  return buildWeekRange(getCurrentWeekStartDate(now, timeZone), 14);
 }
 
 export function buildAppointmentUrl({ start, end }) {
@@ -393,7 +405,9 @@ export async function getAppointments(
     throw new SmokeTestError('getAppointments requires an auth client');
   }
 
-  const dateRange = start && end ? { start, end } : getCurrentWeekRange(now, timeZone);
+  const dateRange = start && end
+    ? { start, end }
+    : getCurrentAndNextWeekRange(now, timeZone);
   const url = buildAppointmentUrl(dateRange);
   const log = (message) => logger(message);
 

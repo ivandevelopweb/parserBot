@@ -45,7 +45,7 @@ In `npm run bot` mode this flow starts once at process startup and then runs eve
 | --- | --- | --- |
 | Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load `.env`, assemble dependencies, and start the selected mode. |
 | Authentication | `src/auth.js`, `src/classroom-web.js` | Perform E-school login through the dynamic Next.js Server Action; keep E-school cookies in memory; and load the already authenticated Classroom browser cookie source. |
-| Diary client | `src/eschool.js` | Bootstrap `seplogin`, fetch the current week from Appointment API, extract homework, and deduplicate it. |
+| Diary client | `src/eschool.js` | Bootstrap `seplogin`, fetch the current and next weeks from Appointment API, extract homework, and deduplicate it. |
 | Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC with explicit state filters, validate the confirmed wire shapes, classify coursework status conservatively, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
 | Domain normalization | `src/sync.js`, `src/utils.js` | Build source-aware fingerprints, snapshots, and normalized fields. `sync.js` also contains the original JSON sync path. |
 | Bot sync | `src/bot-sync.js` | Run each provider independently, compare the latest API snapshot with PostgreSQL, send new or changed tasks, and remove old completed history. |
@@ -80,7 +80,9 @@ Cookies are not written to disk. They live in the current process's `tough-cooki
 2. Select the school binding from the response.
 3. Send `POST /api/v1/seplogin` with that binding.
 4. Check for the `application_token` cookie on `diary.eschool-ua.com`.
-5. Request Appointment API for Monday through Sunday of the current week in `Europe/Kyiv`.
+5. Request Appointment API for Monday through Sunday of the current and next
+   week (14 days) in `Europe/Kyiv`, so next Monday's homework can be notified
+   before the week changes.
 
 The school and student ids are currently constants in `src/eschool.js`. That works for one account, but it is not a multi-user configuration.
 
@@ -507,7 +509,7 @@ Every callback checks the configured `TELEGRAM_CHAT_ID`. Updates from another ch
 
 | Command | Behavior |
 | --- | --- |
-| `npm start` | Smoke-test: login, force a refresh check through `/portal`, fetch the current week, and print tasks to the console. |
+| `npm start` | Smoke-test: login, force a refresh check through `/portal`, fetch the current and next weeks, and print tasks to the console. |
 | `npm run sync` | One production sync: authenticate the E-school provider as needed, fetch E-school and configured Classroom data, compare with PostgreSQL, deliver queued new/changed tasks, and exit. |
 | `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. |
 | `npm run classroom:smoke` | Load the local authenticated Classroom cookies, verify the web session and bootstrap, call `pONvgf` for `CLASSROOM_COURSE_ID` (default `544644036115`), inspect/save the response in debug mode, decode it, and exit. It does not touch Telegram or PostgreSQL. |

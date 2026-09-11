@@ -68,7 +68,7 @@ Run the smoke-test:
 npm start
 ```
 
-Run one production sync. The first run parses the current homework immediately:
+Run one production sync. The first run parses the current and next week's homework immediately:
 
 The command requires `HOMEWORK_DATABASE_URL`; it never falls back to a local
 SQLite file.
@@ -234,7 +234,7 @@ The smoke-test removes only `session_token`, then calls `/portal`. A new `sessio
 
 The current diary also needs a regular HTTP bootstrap: `GET` and `POST /api/v1/seplogin` on `diary.eschool-ua.com`. The client selects school binding `8276`, sends it back, and checks the returned `application_token` cookie. This is the same step used by the browser client, but the project does not use Playwright or Puppeteer.
 
-Appointment API is queried for Monday through Sunday of the current week in `Europe/Kyiv`. On `401`, `403`, or signs of an expired session, the client first tries a refresh through `/portal`. If that fails, it performs one full login. There is no endless retry.
+Appointment API is queried for Monday through Sunday of the current and next week (14 days) in `Europe/Kyiv`. This lets the bot notify about next Monday's homework before the week changes. On `401`, `403`, or signs of an expired session, the client first tries a refresh through `/portal`. If that fails, it performs one full login. There is no endless retry.
 
 The production Classroom provider uses only the authenticated browser-cookie
 web/RPC path. `npm run classroom:smoke` does not use OAuth or modify
