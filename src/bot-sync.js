@@ -1,6 +1,5 @@
 import { deduplicateHomeworkRecords, getAppointments } from './eschool.js';
 import {
-  createCompleteKeyboard,
   formatChangedHomeworkMessage,
   formatNewHomeworkMessage,
 } from './messages.js';
@@ -302,7 +301,6 @@ async function deliverPendingNotifications({
       ? formatChangedHomeworkMessage(currentTask, { classroomAuthuserIndex })
       : formatNewHomeworkMessage(currentTask, { classroomAuthuserIndex });
     const sendOptions = {
-      replyMarkup: createCompleteKeyboard(currentTask.id),
       task: currentTask,
       kind,
       signal,

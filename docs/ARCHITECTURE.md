@@ -496,7 +496,10 @@ completed, and redraws the current list on the same page.
 
 A completed-list button looks like `❌ subject · date · description`. It calls `uncomplete:list:{id}:{page}`, clears `completed_at`, restores the pending status, and redraws the completed list on the same page. It does not navigate to the current list.
 
-The button in a notification uses `complete:{id}`. It marks the task complete and changes the notification into a completed-task screen with a button back to the menu.
+New and changed notifications are sent without an inline completion button. The
+`complete:{id}` callback remains available for compatibility with older
+notifications that still contain that button. Current and completed list
+buttons continue to use their existing callbacks.
 
 Every callback checks the configured `TELEGRAM_CHAT_ID`. Updates from another chat are ignored. The long-polling offset is stored in PostgreSQL, so already processed update ids are not read again after a restart.
 

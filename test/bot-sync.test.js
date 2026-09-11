@@ -289,8 +289,7 @@ test('bot sends one message for a new homework and does not duplicate it', async
     assert.equal(result.newTasks, 1);
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /📚 Нове завдання/);
-    assert.equal(messages[0][1].replyMarkup.inline_keyboard[0][0].text, '✅ Позначити виконаним');
-    assert.match(messages[0][1].replyMarkup.inline_keyboard[0][0].callback_data, /^complete:\d+$/);
+    assert.equal(messages[0][1].replyMarkup, undefined);
   } finally {
     await context.close();
   }
@@ -348,6 +347,7 @@ test('bot sends an update for a changed description', async () => {
     assert.equal(messages.length, 1);
     assert.match(messages[0][0], /✏️ Завдання змінено/);
     assert.match(messages[0][0], /оновлений конспект/);
+    assert.equal(messages[0][1].replyMarkup, undefined);
     assert.equal((await context.database.currentTasks()).length, 1);
   } finally {
     await context.close();
@@ -910,6 +910,7 @@ test('Classroom notifications use the saved Google account order when rendering 
       messages[0][0],
       /<a href="https:\/\/classroom\.google\.com\/c\/Y291cnNlLTFa\/a\/d29yay0y\/details\?authuser=3">Нове завдання \(Classroom\)<\/a>/,
     );
+    assert.equal(messages[0][1].replyMarkup, undefined);
   } finally {
     await context.close();
   }
