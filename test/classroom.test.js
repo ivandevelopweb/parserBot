@@ -7,7 +7,7 @@ import {
   getClassroomHomeworks,
   normalizeClassroomHomework,
 } from '../src/classroom.js';
-import { syncAllHomeworks } from '../src/bot-sync.js';
+import { CLASSROOM_SYNC_META_KEY, syncAllHomeworks } from '../src/bot-sync.js';
 import { createEmptyState } from '../src/state.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
@@ -317,18 +317,158 @@ test('Classroom response failure preserves its previous PostgreSQL snapshot', as
   try {
     await syncAllHomeworks(syncOptions(context, [classroomHomework()], async () => {}));
     const previous = (await context.database.currentTasks())[0];
+    const previousDiagnostics = JSON.parse(
+      await context.database.getMeta(CLASSROOM_SYNC_META_KEY),
+    );
 
     const result = await syncAllHomeworks({
       ...syncOptions(context, [], async () => {}, {
         getClassroomHomeworksFn: async () => {
           throw new Error('Classroom response shape is unknown');
         },
+        now: new Date('2026-09-09T13:00:00.000Z'),
       }),
     });
 
     assert.equal(result.failedProviders[0].source, 'classroom');
+    assert.equal(result.providers.find((provider) => provider.source === 'eschool').status, 'ok');
     assert.deepEqual((await context.database.currentTasks()).map((task) => task.id), [previous.id]);
     assert.equal((await context.database.currentTasks())[0].snapshot.title, previous.snapshot.title);
+    const failedDiagnostics = JSON.parse(
+      await context.database.getMeta(CLASSROOM_SYNC_META_KEY),
+    );
+    assert.equal(failedDiagnostics.status, 'error');
+    assert.equal(failedDiagnostics.attemptedAt, '2026-09-09T13:00:00.000Z');
+    assert.equal(failedDiagnostics.lastSuccessAt, previousDiagnostics.lastSuccessAt);
+    assert.equal(failedDiagnostics.taskCount, previousDiagnostics.taskCount);
+    assert.equal(Object.hasOwn(failedDiagnostics, 'metrics'), false);
+
+    const recovered = await syncAllHomeworks({
+      ...syncOptions(context, [classroomHomework()], async () => {}, {
+        now: new Date('2026-09-09T14:00:00.000Z'),
+      }),
+    });
+    assert.equal(recovered.providers.find((provider) => provider.source === 'classroom').status, 'ok');
+    const recoveredDiagnostics = JSON.parse(
+      await context.database.getMeta(CLASSROOM_SYNC_META_KEY),
+    );
+    assert.equal(recoveredDiagnostics.status, 'ok');
+    assert.equal(recoveredDiagnostics.attemptedAt, '2026-09-09T14:00:00.000Z');
+    assert.equal(recoveredDiagnostics.lastSuccessAt, '2026-09-09T14:00:00.000Z');
+  } finally {
+    await context.close();
+  }
+});
+
+test('first Classroom provider failure records a safe diagnostic with no prior success', async () => {
+  const context = await createSyncContext();
+
+  try {
+    const result = await syncAllHomeworks({
+      ...syncOptions(context, [], async () => {}, {
+        getClassroomHomeworksFn: async () => {
+          throw new Error('synthetic Classroom outage');
+        },
+      }),
+    });
+    assert.equal(result.failedProviders[0].source, 'classroom');
+    assert.deepEqual(
+      JSON.parse(await context.database.getMeta(CLASSROOM_SYNC_META_KEY)),
+      {
+        attemptedAt: FIXED_NOW.toISOString(),
+        lastSuccessAt: null,
+        taskCount: null,
+        status: 'error',
+      },
+    );
+  } finally {
+    await context.close();
+  }
+});
+
+test('Classroom diagnostic corruption or write failure cannot block E-school', async () => {
+  const context = await createSyncContext();
+  const eSchoolTask = {
+    targetAppointmentId: 185190,
+    homeworkId: 101220,
+    subject: 'Алгебра',
+    description: 'Вправа для незалежного джерела',
+    targetDate: '2026-09-11',
+  };
+
+  try {
+    await context.database.setMeta(CLASSROOM_SYNC_META_KEY, '{broken json');
+    const corruptedResult = await syncAllHomeworks({
+      ...syncOptions(context, [], async () => {}, {
+        getAppointmentsFn: async () => ({ homeworkTasks: [eSchoolTask] }),
+        getClassroomHomeworksFn: async () => {
+          throw new Error('corrupted diagnostic probe');
+        },
+      }),
+    });
+    assert.equal(corruptedResult.providers.find((provider) => provider.source === 'eschool').status, 'ok');
+    assert.equal(
+      JSON.parse(await context.database.getMeta(CLASSROOM_SYNC_META_KEY)).status,
+      'error',
+    );
+
+    const originalGetMeta = context.database.getMeta.bind(context.database);
+    context.database.getMeta = async (key) => {
+      if (key === CLASSROOM_SYNC_META_KEY) {
+        throw new Error('diagnostics read unavailable');
+      }
+      return originalGetMeta(key);
+    };
+    const originalSetMeta = context.database.setMeta.bind(context.database);
+    context.database.setMeta = async (key, value) => {
+      if (key === CLASSROOM_SYNC_META_KEY) {
+        throw new Error('diagnostics write unavailable');
+      }
+      return originalSetMeta(key, value);
+    };
+    const writeFailureResult = await syncAllHomeworks({
+      ...syncOptions(context, [], async () => {}, {
+        getAppointmentsFn: async () => ({ homeworkTasks: [eSchoolTask] }),
+        getClassroomHomeworksFn: async () => {
+          throw new Error('provider error must survive metadata failure');
+        },
+      }),
+    });
+    assert.equal(writeFailureResult.failedProviders[0].source, 'classroom');
+    assert.match(writeFailureResult.failedProviders[0].error, /provider error must survive/);
+    assert.equal(writeFailureResult.providers.find((provider) => provider.source === 'eschool').status, 'ok');
+    assert.equal(await context.database.countBySource('eschool'), 1);
+  } finally {
+    await context.close();
+  }
+});
+
+test('Classroom provider cancellation does not persist a false outage', async () => {
+  const context = await createSyncContext();
+  const task = classroomHomework();
+
+  try {
+    await syncAllHomeworks(syncOptions(context, [task], async () => {}));
+    const previous = JSON.parse(await context.database.getMeta(CLASSROOM_SYNC_META_KEY));
+    const controller = new AbortController();
+    await assert.rejects(
+      syncAllHomeworks({
+        ...syncOptions(context, [task], async () => {}, {
+          signal: controller.signal,
+          getClassroomHomeworksFn: async () => {
+            controller.abort();
+            const error = new Error('synthetic cancellation');
+            error.name = 'AbortError';
+            throw error;
+          },
+        }),
+      }),
+      (error) => error.name === 'AbortError',
+    );
+    assert.deepEqual(
+      JSON.parse(await context.database.getMeta(CLASSROOM_SYNC_META_KEY)),
+      previous,
+    );
   } finally {
     await context.close();
   }

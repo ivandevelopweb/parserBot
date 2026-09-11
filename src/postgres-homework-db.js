@@ -1004,8 +1004,9 @@ export async function createPostgresHomeworkDatabase({
     if (outsideAccountingPeriod || nextStatus === 'completed') {
       nextNotificationPending = false;
       nextNotificationKind = null;
-    } else if (notificationKind && nextStatus === 'pending'
-      && existing.completionOrigin !== 'manual') {
+    } else if (notificationKind && nextStatus === 'pending') {
+      // Manual completion/restoration owns the status, but it must not hide
+      // a later provider content change while the task is pending.
       nextNotificationPending = true;
       nextNotificationKind = notificationKind;
     }

@@ -13,9 +13,9 @@ import {
 } from './classroom-url.js';
 import { ConfigError, errorMessage } from './utils.js';
 
-export const HOMEWORK_SYNC_INTERVAL_MS = 10 * 60 * 1000;
-export const DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES = 10;
-export const RENDER_HOMEWORK_SYNC_INTERVAL_MINUTES = 20;
+export const DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES = 20;
+export const HOMEWORK_SYNC_INTERVAL_MS = DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES * 60 * 1000;
+export const RENDER_HOMEWORK_SYNC_INTERVAL_MINUTES = DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES;
 export const MIN_HOMEWORK_SYNC_INTERVAL_MINUTES = 5;
 export const MAX_HOMEWORK_SYNC_INTERVAL_MINUTES = 60;
 export const TELEGRAM_POLL_TIMEOUT_SECONDS = 25;
@@ -160,10 +160,11 @@ export function createTelegramBot({
     for (const provider of providers) {
       if (!provider?.source) continue;
       const current = syncDiagnostics.get(provider.source) ?? {};
+      const hasStage = Object.prototype.hasOwnProperty.call(provider, 'stage');
       syncDiagnostics.set(provider.source, {
         ...current,
         status: provider.status ?? current.status ?? 'unknown',
-        stage: provider.stage ?? current.stage ?? null,
+        stage: hasStage ? provider.stage ?? null : current.stage ?? null,
         attemptedAt: provider.attemptedAt ?? current.attemptedAt ?? null,
         lastSuccessAt: provider.lastSuccessAt ?? current.lastSuccessAt ?? null,
         taskCount: provider.taskCount ?? current.taskCount ?? null,

@@ -25,22 +25,46 @@ const loggedInEschoolClients = new WeakSet();
 export const ESCHOOL_SYNC_META_KEY = 'eschool_sync_status';
 export const CLASSROOM_SYNC_META_KEY = 'classroom_sync_status';
 
+async function readProviderSyncDiagnostics(database, key) {
+  if (typeof database?.getMeta !== 'function') {
+    return {};
+  }
+  try {
+    const parsed = JSON.parse(await database.getMeta(key) || '{}');
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? parsed
+      : {};
+  } catch {
+    return {};
+  }
+}
+
+async function persistProviderSyncDiagnostics(database, key, status, logger, source) {
+  if (typeof database?.setMeta !== 'function') {
+    return;
+  }
+  try {
+    await database.setMeta(key, JSON.stringify(status));
+  } catch {
+    try {
+      logger(`[${source}] Could not persist sync diagnostics`);
+    } catch {
+      // Diagnostic logging must not replace the provider result.
+    }
+  }
+}
+
 async function syncEschool({ auth, getAppointmentsFn, database, logger, now, signal, ...options }) {
   const attemptedAt = new Date(now).toISOString();
   let stage = 'login';
-  let previous = {};
-  try {
-    previous = JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY) || '{}');
-  } catch {
-    // Diagnostics must not prevent homework synchronization.
-  }
-  const saveStatus = async (status) => {
-    try {
-      await database.setMeta(ESCHOOL_SYNC_META_KEY, JSON.stringify(status));
-    } catch {
-      logger('[eschool] Could not persist sync diagnostics');
-    }
-  };
+  const previous = await readProviderSyncDiagnostics(database, ESCHOOL_SYNC_META_KEY);
+  const saveStatus = (status) => persistProviderSyncDiagnostics(
+    database,
+    ESCHOOL_SYNC_META_KEY,
+    status,
+    logger,
+    ESCHOOL_SOURCE,
+  );
   try {
     const result = await syncProviderHomeworks({
       ...options, database, logger, now, signal, source: ESCHOOL_SOURCE,
@@ -66,7 +90,7 @@ async function syncEschool({ auth, getAppointmentsFn, database, logger, now, sig
     };
     await saveStatus(status);
     logger(`[eschool] Sync status: ${status.status}; tasks: ${status.taskCount}; last success: ${attemptedAt}`);
-    return result;
+    return { ...result, stage: status.stage };
   } catch (error) {
     if (!signal?.aborted) {
       await saveStatus({
@@ -83,6 +107,16 @@ async function syncEschool({ auth, getAppointmentsFn, database, logger, now, sig
     }
     throw error;
   }
+}
+
+async function recordClassroomProviderFailure({ database, timestamp, logger }) {
+  const previous = await readProviderSyncDiagnostics(database, CLASSROOM_SYNC_META_KEY);
+  await persistProviderSyncDiagnostics(database, CLASSROOM_SYNC_META_KEY, {
+    attemptedAt: timestamp,
+    lastSuccessAt: previous?.lastSuccessAt ?? null,
+    taskCount: previous?.taskCount ?? null,
+    status: 'error',
+  }, logger, CLASSROOM_SOURCE);
 }
 
 function throwIfAborted(signal) {
@@ -808,6 +842,11 @@ export async function syncAllHomeworks({
       if (signal?.aborted) {
         throw error;
       }
+      await recordClassroomProviderFailure({
+        database,
+        timestamp: new Date(now).toISOString(),
+        logger,
+      });
       logger(`[bot-sync] ${CLASSROOM_SOURCE} provider failed: ${errorMessage(error)}`);
       providers.push({
         source: CLASSROOM_SOURCE,

@@ -470,6 +470,80 @@ test('E-school display-field changes notify while the normalized snapshot stays 
   }
 });
 
+for (const source of ['eschool', 'classroom']) {
+  test(`${source} manual restoration keeps content notifications and retry semantics`, async () => {
+    const context = await createTestContext();
+    const original = source === 'classroom' ? classroomHomework() : homework();
+    const changedWhileCompleted = source === 'classroom'
+      ? classroomHomework({ description: 'Зміна під час виконаного стану' })
+      : homework({ description: 'Зміна під час виконаного стану' });
+    const changedWhilePending = source === 'classroom'
+      ? classroomHomework({ description: 'Зміна після відновлення' })
+      : homework({ description: 'Зміна після відновлення' });
+    let shouldFailDelivery = true;
+    let deliveryAttempts = 0;
+    let successfulDeliveries = 0;
+
+    const sync = async (task) => syncProviderHomeworks({
+      source,
+      database: context.database,
+      fetchTasksFn: async () => source === 'classroom'
+        ? classroomResult([{ task, status: 'pending' }])
+        : { homeworkTasks: [task], snapshotComplete: true },
+      sendMessageFn: async () => {
+        deliveryAttempts += 1;
+        if (shouldFailDelivery) throw new Error('synthetic Telegram failure');
+        successfulDeliveries += 1;
+      },
+      logger: () => {},
+      now: FIXED_NOW,
+    });
+
+    try {
+      await sync(original);
+      const baseline = (await context.database.currentTasks())[0];
+      await context.database.completeTask(baseline.id, FIXED_NOW);
+
+      await sync(changedWhileCompleted);
+      let stored = await context.database.findById(baseline.id);
+      assert.equal(stored.status, 'completed');
+      assert.equal(stored.completionOrigin, 'manual');
+      assert.equal(stored.snapshot.description, changedWhileCompleted.description
+        ?? changedWhileCompleted.snapshot.description);
+      assert.equal(stored.notificationPending, false);
+      assert.equal(deliveryAttempts, 0);
+
+      await context.database.uncompleteTask(baseline.id, FIXED_NOW);
+      await sync(changedWhileCompleted);
+      stored = await context.database.findById(baseline.id);
+      assert.equal(stored.status, 'pending');
+      assert.equal(stored.completionOrigin, 'manual');
+      assert.equal(stored.notificationPending, false);
+      assert.equal(deliveryAttempts, 0, 'Restoration without a content change must stay quiet');
+
+      await sync(changedWhilePending);
+      stored = await context.database.findById(baseline.id);
+      assert.equal(stored.status, 'pending');
+      assert.equal(stored.completionOrigin, 'manual');
+      assert.equal(stored.notificationPending, true);
+      assert.equal(deliveryAttempts, 1);
+      assert.equal(successfulDeliveries, 0);
+
+      shouldFailDelivery = false;
+      await sync(changedWhilePending);
+      assert.equal(deliveryAttempts, 2);
+      assert.equal(successfulDeliveries, 1);
+      assert.equal((await context.database.pendingNotifications(source)).length, 0);
+
+      await sync(changedWhilePending);
+      assert.equal(deliveryAttempts, 2, 'An unchanged snapshot must not send twice');
+      assert.equal(successfulDeliveries, 1);
+    } finally {
+      await context.close();
+    }
+  });
+}
+
 test('Telegram failure leaves one task pending without hiding the saved snapshot', async () => {
   const context = await createTestContext();
   const newTask = homework({ targetAppointmentId: 185142, description: 'Нове завдання' });

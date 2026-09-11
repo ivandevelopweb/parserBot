@@ -4,8 +4,11 @@ import assert from 'node:assert/strict';
 import {
   createTelegramBot,
   getSyncStaleAfterMs,
+  HOMEWORK_SYNC_INTERVAL_MS,
   parseHomeworkSyncIntervalMinutes,
+  DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES,
 } from '../src/telegram-bot.js';
+import { syncAllHomeworks } from '../src/bot-sync.js';
 import { CLASSROOM_AUTHUSER_META_KEY } from '../src/classroom-url.js';
 import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
@@ -29,8 +32,14 @@ function createTelegramMock() {
 }
 
 test('sync interval configuration is bounded and diagnostics are kept in memory', async () => {
-  assert.equal(parseHomeworkSyncIntervalMinutes(undefined), 10);
+  assert.equal(DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES, 20);
+  assert.equal(HOMEWORK_SYNC_INTERVAL_MS, 20 * 60 * 1000);
+  assert.equal(parseHomeworkSyncIntervalMinutes(undefined), 20);
+  assert.equal(parseHomeworkSyncIntervalMinutes(''), 20);
+  assert.equal(parseHomeworkSyncIntervalMinutes('  '), 20);
+  assert.equal(parseHomeworkSyncIntervalMinutes('5'), 5);
   assert.equal(parseHomeworkSyncIntervalMinutes('20'), 20);
+  assert.equal(parseHomeworkSyncIntervalMinutes('60'), 60);
   assert.throws(() => parseHomeworkSyncIntervalMinutes('4'), /from 5 to 60/);
   assert.throws(() => parseHomeworkSyncIntervalMinutes('10.5'), /integer/);
   assert.equal(getSyncStaleAfterMs(20 * 60 * 1000), 45 * 60 * 1000);
@@ -64,6 +73,80 @@ test('sync interval configuration is bounded and diagnostics are kept in memory'
   assert.equal(databaseReads, 0);
   assert.equal(bot.getDiagnostics().eschool.status, 'ok');
   assert.equal(bot.getDiagnostics().eschool.stale, false);
+});
+
+test('health diagnostics expose E-school failure stages and clear them after recovery', async () => {
+  const { database } = await createTestDatabase();
+  let loginFailure = true;
+  let appointmentsFailure = false;
+  let deliveryFailure = false;
+  let currentTask = {
+    targetAppointmentId: 185190,
+    homeworkId: 101220,
+    subject: 'Алгебра',
+    description: 'Перше завдання',
+    targetDate: '2026-09-14',
+  };
+  const now = new Date('2026-09-12T10:00:00.000Z');
+  const bot = createTelegramBot({
+    auth: {
+      async fullLogin() {
+        if (loginFailure) throw new Error('synthetic login outage');
+      },
+    },
+    telegram: {},
+    database,
+    allowedChatId: '123',
+    now: () => now,
+    syncFn: (options) => syncAllHomeworks({
+      ...options,
+      legacyStateStore: null,
+      getAppointmentsFn: async () => {
+        if (appointmentsFailure) throw new Error('synthetic appointment outage');
+        return { homeworkTasks: [currentTask] };
+      },
+      sendMessageFn: async () => {
+        if (deliveryFailure) throw new Error('synthetic Telegram outage');
+      },
+    }),
+    logger: () => {},
+  });
+
+  try {
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'error');
+    assert.equal(bot.getDiagnostics().eschool.stage, 'login');
+
+    loginFailure = false;
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'ok');
+    assert.equal(bot.getDiagnostics().eschool.stage, null);
+
+    appointmentsFailure = true;
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'error');
+    assert.equal(bot.getDiagnostics().eschool.stage, 'appointments');
+    assert.equal(bot.getDiagnostics().eschool.lastSuccessAt, now.toISOString());
+
+    appointmentsFailure = false;
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'ok');
+    assert.equal(bot.getDiagnostics().eschool.stage, null);
+
+    currentTask = { ...currentTask, description: 'Оновлене завдання' };
+    deliveryFailure = true;
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'delivery_error');
+    assert.equal(bot.getDiagnostics().eschool.stage, 'delivery');
+    assert.equal(bot.getDiagnostics().eschool.lastSuccessAt, now.toISOString());
+
+    deliveryFailure = false;
+    await bot.runSync();
+    assert.equal(bot.getDiagnostics().eschool.status, 'ok');
+    assert.equal(bot.getDiagnostics().eschool.stage, null);
+  } finally {
+    await database.close();
+  }
 });
 
 async function createBotContext() {

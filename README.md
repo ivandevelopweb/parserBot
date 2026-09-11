@@ -10,7 +10,7 @@ A small Node.js client that can:
 6. import eligible Google Classroom coursework into the same task store as Єдина школа;
 7. sync new and changed homework from both sources to Telegram;
 8. provide current and completed homework screens in one Telegram interface;
-9. run an automatic sync every 10 minutes by default (configurable from 5 to
+9. run an automatic sync every 20 minutes by default (configurable from 5 to
    60 minutes).
 
 Developer documentation:
@@ -48,7 +48,7 @@ CLASSROOM_COOKIES_JSON=
 CLASSROOM_COOKIES_FILE=classroom-cookies.json
 CLASSROOM_COURSE_ID=544644036115  # only for the single-course smoke-test
 HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
-HOMEWORK_SYNC_INTERVAL_MINUTES=10  # integer from 5 to 60; Render uses 20
+HOMEWORK_SYNC_INTERVAL_MINUTES=20  # integer from 5 to 60; explicit values override the default
 ```
 
 For the local Classroom web smoke-test, export cookies from an already
@@ -122,12 +122,16 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 10 minutes by default,
+`npm run bot` runs one sync immediately, repeats it every 20 minutes by default,
 and handles Telegram commands in parallel. Set
 `HOMEWORK_SYNC_INTERVAL_MINUTES` to an integer from `5` to `60` to change the
-period; the prepared Render profile uses `20`. A longer period reduces polling
-and database activity but can delay discovery and notification retries by up to
-one interval plus the provider cycle duration. The first sync remains
+period; the prepared Render profile also uses `20`. An explicit server value of
+`10` remains an override and must be changed to `20` during rollout. A longer
+period reduces polling and database activity but can delay discovery and
+notification retries by up to one interval plus the provider cycle duration.
+At 20 minutes this is 72 planned runs per day instead of 144, excluding process
+starts; that frequency change is not proof of a twofold Neon cost reduction.
+The first sync remains
 immediate, overlapping cycles are skipped, and shutdown cancels and drains the
 active cycle. The bot syncs Єдину школу and, when a Classroom cookie source is
 configured, dynamically discovered Classroom coursework. Only assignments
@@ -186,8 +190,11 @@ time, task count, status, metrics, and (for E-school) the failure stage. Before
 the first result a provider is `unknown` and `stale`. The stale threshold is
 derived from the configured interval (at least 30 minutes), so a 20-minute
 profile is not falsely stale after 30 minutes. Health GET and HEAD perform no
-SQL; they only read the bot's in-memory state. A provider error does not change
-readiness or trigger an application-side restart. These diagnostics contain no
+SQL; they only read the bot's in-memory state. A recovered E-school result
+clears its previous failure stage. A Classroom provider failure is also written
+to compact PostgreSQL diagnostics while retaining its last successful snapshot
+time and task count. A provider error does not change readiness or trigger an
+application-side restart. These diagnostics contain no
 task text, SQL parameters, cookies, tokens, or connection strings. HEAD remains
 a process/readiness check without a response body.
 
@@ -245,7 +252,10 @@ and source label when a usable URL fits; missing/unsafe URLs fall back to text.
 Previously delivered messages are not rewritten by this formatting change.
 
 The bot UI state, Classroom account-order preference, compact snapshots, Telegram
-offset, and pending notification queue are stored in PostgreSQL. Pending tasks are not removed by age. Completed
+offset, and pending notification queue are stored in PostgreSQL. Manual completion
+and restoration keep priority over automatic status changes, while a later
+content change on a pending manually restored task still enters the notification
+queue. Pending tasks are not removed by age. Completed
 tasks are removed after 14 days from `completedAt` during a later sync. A
 failed Telegram request leaves its queue entry pending for a later cycle.
 

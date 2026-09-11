@@ -38,7 +38,7 @@ Telegram update → telegram-bot → callback/command → PostgreSQL → edit me
 ```
 
 In `npm run bot` mode this flow starts once at process startup and then runs
-every 10 minutes by default. `HOMEWORK_SYNC_INTERVAL_MINUTES` accepts an
+every 20 minutes by default. `HOMEWORK_SYNC_INTERVAL_MINUTES` accepts an
 integer from 5 through 60; the Render profile sets 20. Telegram long polling
 runs in the same process. A provider failure is logged and does not prevent the
 other provider from running.
@@ -112,7 +112,12 @@ status, and stage. The Classroom branch stores the corresponding compact
 `classroom_sync_status` value, including its metrics. These values contain no
 exception text, provider payload, or credentials and require no schema
 migration. A delivery failure has its own status; the snapshot success time
-still advances because persistence already succeeded.
+still advances because persistence already succeeded. E-school results carry an
+explicit `stage` (including `null` after recovery), so in-memory health does not
+retain an old login or appointment failure. A Classroom provider failure writes
+`status: error`, the current attempt time, the last successful snapshot time,
+and the last known task count to durable diagnostics; it does not copy stale
+metrics or exception text.
 
 The bot also keeps the latest per-provider sync state in memory and exposes it
 through GET `/healthz`. Health GET and HEAD never read PostgreSQL, so frequent
@@ -413,6 +418,12 @@ rejected instead of being opened with an incomplete contract.
 
 The current list selects only `is_current = 1 AND status = 'pending'`. The completed history selects every row with `status = 'completed'`, even when that task later disappears from the API.
 
+Manual completion and restoration keep `completion_origin = manual` and remain
+authoritative for the final status. That status protection is separate from
+content notifications: a significant provider change may queue a notification
+when the restored task is pending, while changes to a completed task still clear
+the stale queue and do not send.
+
 When an E-school task disappears from the API, sync does not send a deletion
 notification. Its row stays in PostgreSQL, but a pending row with
 `is_current = 0` is not shown in the current list until the task appears again.
@@ -581,7 +592,7 @@ Every callback checks the configured `TELEGRAM_CHAT_ID`. Updates from another ch
 | --- | --- |
 | `npm start` | Smoke-test: login, force a refresh check through `/portal`, fetch the current and next weeks, and print tasks to the console. |
 | `npm run sync` | One production sync: authenticate the E-school provider as needed, fetch E-school and configured Classroom data, compare with PostgreSQL, deliver queued new/changed tasks, and exit. |
-| `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. |
+| `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 20 minutes by default. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. |
 | `npm run classroom:smoke` | Load the local authenticated Classroom cookies, verify the web session and bootstrap, call `pONvgf` for `CLASSROOM_COURSE_ID` (default `544644036115`), inspect/save the response in debug mode, decode it, and exit. It does not touch Telegram or PostgreSQL. |
 | `npm run classroom:courses:smoke` | Load `/h`, discover the visible courses from `gXtzob` without hardcoded course ids, fetch all available `pONvgf` pages for every course, print `course name | assignments fetched | pages fetched | newest assignment`, and exit. It does not touch Telegram or PostgreSQL. |
 | `npm run telegram:test` | Send one diagnostic message to the configured chat. This has an external side effect and should not be run by accident. |
@@ -621,11 +632,15 @@ temporary/in-memory PostgreSQL fixtures and does not authorize providers or
 send Telegram messages. An external monitor such as UptimeRobot may request
 `/healthz` to reduce free-service sleeping; configuring it is an operator task,
 not an application-side integration. The Blueprint sets
-`HOMEWORK_SYNC_INTERVAL_MINUTES=20`; the application default remains 10 and
-the accepted range is 5–60. A 20-minute run may delay discovery or a retry by
-one interval plus the sync duration, but reduces periodic provider/database
-work. Increasing this setting is not a substitute for the SQL batching and
-conditional-write changes above.
+`HOMEWORK_SYNC_INTERVAL_MINUTES=20`; the application default is also 20 and
+the accepted range is 5–60. An explicit `10` in a server environment remains
+an override and must be replaced with `20` during rollout; a new application
+default cannot change an existing environment value. A 20-minute run may delay
+discovery or a retry by one interval plus the sync duration, gives at most 72
+planned runs per day instead of 144 (excluding process starts), and reduces
+periodic provider/database work. This frequency calculation is not proof of a
+twofold Neon cost reduction, and increasing the setting is not a substitute
+for the SQL batching and conditional-write changes above.
 
 #### Rollout and rollback
 
