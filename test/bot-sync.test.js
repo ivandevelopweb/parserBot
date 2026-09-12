@@ -757,6 +757,43 @@ test('snapshot transaction rolls back all source changes on a mid-write failure'
   }
 });
 
+test('a snapshot save failure does not acknowledge a Telegram delivery', async () => {
+  const context = await createTestContext();
+  const newTask = homework({ targetAppointmentId: 185150, description: 'Не сохраненное задание' });
+  let sends = 0;
+  let acknowledgements = 0;
+
+  try {
+    await syncBotHomeworks(options(context, [homework()], async () => {}));
+    const originalApplyProviderSnapshot = context.database.applyProviderSnapshot;
+    const originalRecordNotificationSuccess = context.database.recordNotificationSuccess;
+    context.database.applyProviderSnapshot = async () => {
+      throw new Error('synthetic PostgreSQL save failure');
+    };
+    context.database.recordNotificationSuccess = async (...args) => {
+      acknowledgements += 1;
+      return originalRecordNotificationSuccess(...args);
+    };
+
+    await assert.rejects(
+      () => syncBotHomeworks(options(
+        context,
+        [homework(), newTask],
+        async () => { sends += 1; },
+      )),
+      /synthetic PostgreSQL save failure/,
+    );
+
+    assert.equal(sends, 0);
+    assert.equal(acknowledgements, 0);
+    assert.equal(await context.database.count(), 1);
+    assert.equal((await context.database.pendingNotifications('eschool')).length, 0);
+    context.database.applyProviderSnapshot = originalApplyProviderSnapshot;
+  } finally {
+    await context.close();
+  }
+});
+
 test('bot deduplicates multiple homework ids into one notification', async () => {
   const context = await createTestContext();
   const messages = [];

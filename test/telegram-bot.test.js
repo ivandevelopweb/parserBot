@@ -80,6 +80,41 @@ test('sync interval configuration is bounded and diagnostics are kept in memory'
   assert.equal(bot.getDiagnostics().eschool.stale, false);
 });
 
+test('a rejected sync releases the running guard so the next cycle can start', async () => {
+  let calls = 0;
+  const bot = createTelegramBot({
+    auth: {},
+    telegram: createTelegramMock(),
+    database: {},
+    allowedChatId: '123',
+    syncFn: async () => {
+      calls += 1;
+      if (calls === 1) {
+        throw new Error('synthetic PostgreSQL failure');
+      }
+      return {
+        providers: [{
+          source: 'eschool',
+          status: 'ok',
+          attemptedAt: new Date().toISOString(),
+          lastSuccessAt: new Date().toISOString(),
+          taskCount: 0,
+        }],
+      };
+    },
+    logger: () => {},
+  });
+
+  await assert.rejects(
+    () => bot.runSync({ throwOnError: true }),
+    /synthetic PostgreSQL failure/,
+  );
+  const nextResult = await bot.runSync();
+
+  assert.equal(calls, 2);
+  assert.equal(nextResult.providers[0].status, 'ok');
+});
+
 test('health diagnostics expose E-school failure stages and clear them after recovery', async () => {
   const { database } = await createTestDatabase();
   let loginFailure = true;

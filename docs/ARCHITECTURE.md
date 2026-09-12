@@ -377,6 +377,45 @@ An unsupported future version is rejected. There is intentionally no SQLite
 data migration: the move to PostgreSQL starts with a clean PostgreSQL schema,
 and the old local SQLite file is neither read nor deleted.
 
+### Connection bounds and failure recovery
+
+The application-created two-connection `pg.Pool` uses a 10-second
+`connectionTimeoutMillis` and 30-second `idleTimeoutMillis`. Its PostgreSQL
+startup settings apply a 5-second `lock_timeout` and a 20-second
+`statement_timeout`; `pg` also applies a 25-second client-side `query_timeout`
+to every connection. Consequently the limits cover pool queries, checked-out
+clients, schema initialization/migration, and transaction control commands
+such as `BEGIN`, `COMMIT`, and `ROLLBACK`. These are deliberately fixed
+starting limits for the small bot, not environment settings or measured
+production SLOs.
+
+Immediately after a pool is created or accepted, the adapter installs its own
+`error` listener when the pool supports EventEmitter methods. `pg-pool` emits
+that event for an idle client only after removing the failed client. The
+listener emits one fixed safe diagnostic and never includes the error object,
+connection URL, SQL, parameters, or homework content. It neither recreates the
+pool nor retries SQL. The listener remains attached while `end()` drains the
+pool, then removes only its own function; an initialization failure follows the
+same order for an owned pool. A supplied pool is not ended on initialization
+failure, preserving the existing ownership contract, while `database.close()`
+continues to close it as before.
+
+`query_timeout` rejects the JavaScript query result but does not by itself
+cancel an active non-pipeline query on the PostgreSQL connection. Therefore a
+transaction treats `pg`'s client read timeout, a transport/client failure, or a
+failed rollback as an unusable client and releases it with `release(true)` so
+the pool destroys it. For an ordinary SQL error while the client is still
+healthy, the adapter sends `ROLLBACK`, which inherits the same query deadline,
+before releasing the client normally. Release is guarded to one call, cleanup
+errors do not replace the original `HomeworkDatabaseError`, and neither writes
+nor `COMMIT` are retried because their outcome may be unknown after a network
+failure.
+
+The local suite uses controlled clients to cover these cleanup branches.
+`pg-mem` does not prove a real server's `pg_sleep`, lock wait, cancellation, or
+socket-break timing; those scenarios require a disposable local PostgreSQL
+instance and are not run against the configured homework database.
+
 ### Tables
 
 `database_meta` stores small process values:

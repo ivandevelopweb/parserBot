@@ -173,6 +173,29 @@ the regular Aiven Service URI with TLS. See the
 [Render Blueprint reference](https://render.com/docs/blueprint-spec) and
 [free instance documentation](https://render.com/docs/free).
 
+### PostgreSQL time limits and recovery
+
+The application-created `pg.Pool` keeps its 10-second connection-acquisition
+deadline and 30-second idle-client timeout. Every pool client also receives a
+5-second PostgreSQL `lock_timeout`, a 20-second PostgreSQL
+`statement_timeout`, and a 25-second `pg` `query_timeout`. These settings cover
+ordinary repository queries, migration work, and commands on checked-out
+transaction clients, including `BEGIN`, `COMMIT`, and `ROLLBACK`; no additional
+environment variables are needed.
+
+The pool has a fixed, sanitized idle-client error diagnostic. It never prints a
+connection string, SQL, parameters, task text, or the received error object;
+`pg` removes the failed idle connection itself. During shutdown the handler
+stays installed until the pool has finished closing, then only that handler is
+removed.
+
+`query_timeout` is a client-side deadline, not a cancellation protocol for an
+already active PostgreSQL statement. A timed-out, disconnected, or failed-
+rollback transaction client is released with `release(true)` so `pg` discards
+it rather than reusing a possibly busy connection. A normal SQL error receives
+a bounded rollback first. The adapter never retries a write or `COMMIT`, and a
+rollback/release cleanup error never replaces the original database error.
+
 The service is intentionally single-instance: Telegram long polling has one
 owner, even though PostgreSQL is remote. Render must not scale this service
 horizontally. On SIGTERM/SIGINT the bot stops polling, aborts the active HTTP

@@ -1,5 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { EventEmitter } from 'node:events';
 
 import { newDb } from 'pg-mem';
 
@@ -10,6 +11,79 @@ function createPool() {
   const memory = newDb();
   const { Pool } = memory.adapters.createPg();
   return { memory, pool: new Pool() };
+}
+
+function createEventedPool(pool) {
+  const events = new EventEmitter();
+  const wrapped = {
+    query: (...args) => pool.query(...args),
+    connect: (...args) => pool.connect(...args),
+    end: (...args) => pool.end(...args),
+    on(...args) {
+      events.on(...args);
+      return wrapped;
+    },
+    off(...args) {
+      events.off(...args);
+      return wrapped;
+    },
+    emit: (...args) => events.emit(...args),
+    listenerCount: (...args) => events.listenerCount(...args),
+    removeListener(...args) {
+      events.removeListener(...args);
+      return wrapped;
+    },
+  };
+  return wrapped;
+}
+
+function createControlledTransactionPool() {
+  const { pool } = createPool();
+  const state = {
+    statements: [],
+    releaseCalls: [],
+    operationError: null,
+    rollbackError: null,
+  };
+  const controlledPool = {
+    on: (...args) => pool.on(...args),
+    off: (...args) => pool.off(...args),
+    query: (...args) => pool.query(...args),
+    end: (...args) => pool.end(...args),
+    async connect() {
+      const client = await pool.connect();
+      let clientReleased = false;
+      return {
+        async query(sql, values) {
+          const statement = String(sql).trim();
+          state.statements.push(statement);
+          if (state.operationError && /^DELETE FROM homework_tasks/u.test(statement)) {
+            throw state.operationError;
+          }
+          if (state.rollbackError && statement === 'ROLLBACK') {
+            throw state.rollbackError;
+          }
+          return client.query(sql, values);
+        },
+        release(value) {
+          if (clientReleased) {
+            throw new Error('test client released twice');
+          }
+          clientReleased = true;
+          state.releaseCalls.push(value);
+          client.release();
+        },
+      };
+    },
+  };
+  return { pool: controlledPool, state };
+}
+
+function resetControlledTransactionState(state) {
+  state.statements.length = 0;
+  state.releaseCalls.length = 0;
+  state.operationError = null;
+  state.rollbackError = null;
 }
 
 function task({
@@ -371,5 +445,248 @@ test('PostgreSQL v3 migration preserves rows, marks old completed rows manual, a
     assert.equal((await reopened.findByFingerprint('old-pending')).status, 'pending');
   } finally {
     await reopened.close();
+  }
+});
+
+test('PostgreSQL pool background errors are safe and do not block the next query', async () => {
+  const { pool: rawPool } = createPool();
+  const pool = createEventedPool(rawPool);
+  const diagnostics = [];
+  const foreignErrors = [];
+  const foreignListener = (error) => foreignErrors.push(error);
+  pool.on('error', foreignListener);
+  const listenersBeforeDatabase = pool.listenerCount('error');
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+    logger: (message) => diagnostics.push(message),
+  });
+  const secret = 'postgresql://user:secret@example.test/homework SELECT private homework text';
+
+  try {
+    assert.equal(pool.listenerCount('error'), listenersBeforeDatabase + 1);
+    assert.doesNotThrow(() => pool.emit('error', new Error(secret)));
+    assert.equal(await database.count(), 0, 'another available connection remains usable');
+    assert.deepEqual(diagnostics, [
+      '[database] PostgreSQL pool reported an idle-client error; pg removed the connection',
+    ]);
+    assert.doesNotMatch(diagnostics.join('\n'), /secret|SELECT|private homework/i);
+    assert.equal(foreignErrors.length, 1);
+  } finally {
+    await database.close();
+  }
+
+  assert.equal(pool.listenerCount('error'), listenersBeforeDatabase);
+  pool.emit('error', new Error('foreign listener remains installed'));
+  assert.equal(foreignErrors.length, 2);
+  pool.removeListener('error', foreignListener);
+});
+
+test('PostgreSQL keeps its pool error handler installed until close has drained', async () => {
+  const { pool: rawPool } = createPool();
+  const pool = createEventedPool(rawPool);
+  const diagnostics = [];
+  const originalEnd = pool.end;
+  let notifyEndStarted;
+  let finishEnd;
+  const endStarted = new Promise((resolve) => {
+    notifyEndStarted = resolve;
+  });
+  const endGate = new Promise((resolve) => {
+    finishEnd = resolve;
+  });
+  pool.end = async () => {
+    notifyEndStarted();
+    await endGate;
+    return originalEnd();
+  };
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+    logger: (message) => diagnostics.push(message),
+  });
+
+  const closePromise = database.close();
+  await endStarted;
+  assert.equal(pool.listenerCount('error'), 1);
+  assert.doesNotThrow(() => pool.emit('error', new Error('synthetic idle close error')));
+  assert.equal(diagnostics.length, 1);
+  finishEnd();
+  await closePromise;
+  assert.equal(pool.listenerCount('error'), 0);
+});
+
+test('PostgreSQL adapter accepts a pool without EventEmitter methods and closes it once', async () => {
+  const { pool } = createPool();
+  let endCalls = 0;
+  const noEventPool = {
+    query: (...args) => pool.query(...args),
+    connect: (...args) => pool.connect(...args),
+    async end() {
+      endCalls += 1;
+      return pool.end();
+    },
+  };
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool: noEventPool,
+  });
+
+  try {
+    assert.equal(await database.count(), 0);
+  } finally {
+    await database.close();
+    await database.close();
+  }
+
+  assert.equal(endCalls, 1);
+});
+
+test('PostgreSQL removes only its listener after an injected-pool initialization error', async () => {
+  const pool = new EventEmitter();
+  const foreignErrors = [];
+  const foreignListener = (error) => foreignErrors.push(error);
+  pool.on('error', foreignListener);
+  const listenersBeforeDatabase = pool.listenerCount('error');
+  let endCalls = 0;
+  pool.query = async () => {
+    throw new Error('synthetic schema failure');
+  };
+  pool.end = async () => {
+    endCalls += 1;
+  };
+
+  await assert.rejects(
+    () => createPostgresHomeworkDatabase({
+      connectionString: 'postgresql://test/test',
+      pool,
+      logger: () => {},
+    }),
+    /PostgreSQL query failed: synthetic schema failure/,
+  );
+
+  assert.equal(endCalls, 0, 'the adapter does not close a failed injected pool');
+  assert.equal(pool.listenerCount('error'), listenersBeforeDatabase);
+  pool.emit('error', new Error('foreign listener remains installed'));
+  assert.equal(foreignErrors.length, 1);
+  pool.removeListener('error', foreignListener);
+});
+
+test('ordinary transaction SQL errors roll back and release the client once', async () => {
+  const { pool, state } = createControlledTransactionPool();
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+  });
+  const originalError = new Error('synthetic write failure');
+
+  try {
+    resetControlledTransactionState(state);
+    state.operationError = originalError;
+    let receivedError;
+    await assert.rejects(
+      () => database.deleteCompletedBefore('2026-09-16T12:00:00.000Z'),
+      (error) => {
+        receivedError = error;
+        return error.name === 'HomeworkDatabaseError';
+      },
+    );
+
+    assert.equal(receivedError.cause, originalError);
+    assert.equal(state.statements[0], 'BEGIN');
+    assert.match(state.statements[1], /^DELETE FROM homework_tasks/u);
+    assert.equal(state.statements[2], 'ROLLBACK');
+    assert.equal(state.statements.length, 3);
+    assert.deepEqual(state.releaseCalls, [undefined]);
+  } finally {
+    await database.close();
+  }
+});
+
+test('a client query timeout discards the transaction client without queuing rollback', async () => {
+  const { pool, state } = createControlledTransactionPool();
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+  });
+  const timeoutError = new Error('Query read timeout');
+
+  try {
+    resetControlledTransactionState(state);
+    state.operationError = timeoutError;
+    let receivedError;
+    await assert.rejects(
+      () => database.deleteCompletedBefore('2026-09-16T12:00:00.000Z'),
+      (error) => {
+        receivedError = error;
+        return error.name === 'HomeworkDatabaseError';
+      },
+    );
+
+    assert.equal(receivedError.cause, timeoutError);
+    assert.equal(state.statements[0], 'BEGIN');
+    assert.match(state.statements[1], /^DELETE FROM homework_tasks/u);
+    assert.equal(state.statements.some((statement) => statement === 'ROLLBACK'), false);
+    assert.deepEqual(state.releaseCalls, [true]);
+  } finally {
+    await database.close();
+  }
+});
+
+test('a transport failure discards the transaction client without queuing rollback', async () => {
+  const { pool, state } = createControlledTransactionPool();
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+  });
+  const transportError = Object.assign(new Error('synthetic socket reset'), { code: 'ECONNRESET' });
+
+  try {
+    resetControlledTransactionState(state);
+    state.operationError = transportError;
+    let receivedError;
+    await assert.rejects(
+      () => database.deleteCompletedBefore('2026-09-16T12:00:00.000Z'),
+      (error) => {
+        receivedError = error;
+        return error.name === 'HomeworkDatabaseError';
+      },
+    );
+
+    assert.equal(receivedError.cause, transportError);
+    assert.equal(state.statements.some((statement) => statement === 'ROLLBACK'), false);
+    assert.deepEqual(state.releaseCalls, [true]);
+  } finally {
+    await database.close();
+  }
+});
+
+test('a rollback error discards the client once while preserving the original failure', async () => {
+  const { pool, state } = createControlledTransactionPool();
+  const database = await createPostgresHomeworkDatabase({
+    connectionString: 'postgresql://test/test',
+    pool,
+  });
+  const originalError = new Error('synthetic write failure');
+  const rollbackError = new Error('synthetic rollback failure');
+
+  try {
+    resetControlledTransactionState(state);
+    state.operationError = originalError;
+    state.rollbackError = rollbackError;
+    let receivedError;
+    await assert.rejects(
+      () => database.deleteCompletedBefore('2026-09-16T12:00:00.000Z'),
+      (error) => {
+        receivedError = error;
+        return error.name === 'HomeworkDatabaseError';
+      },
+    );
+
+    assert.equal(receivedError.cause, originalError);
+    assert.equal(state.statements.at(-1), 'ROLLBACK');
+    assert.deepEqual(state.releaseCalls, [true]);
+  } finally {
+    await database.close();
   }
 });

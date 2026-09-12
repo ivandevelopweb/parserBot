@@ -50,6 +50,113 @@ const HOMEWORK_TASK_COLUMNS = Object.freeze([
 const HOMEWORK_TASK_SELECT = HOMEWORK_TASK_COLUMNS.join(', ');
 const MATCH_BATCH_SIZE = 250;
 const INSERT_BATCH_SIZE = 100;
+const POSTGRES_CONNECTION_TIMEOUT_MILLIS = 10_000;
+const POSTGRES_IDLE_TIMEOUT_MILLIS = 30_000;
+const POSTGRES_LOCK_TIMEOUT_MILLIS = 5_000;
+const POSTGRES_STATEMENT_TIMEOUT_MILLIS = 20_000;
+const POSTGRES_QUERY_TIMEOUT_MILLIS = 25_000;
+const POOL_ERROR_DIAGNOSTIC = '[database] PostgreSQL pool reported an idle-client error; pg removed the connection';
+const TRANSPORT_ERROR_CODES = new Set([
+  'ECONNABORTED',
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ENETDOWN',
+  'ENETRESET',
+  'ENETUNREACH',
+  'EHOSTDOWN',
+  'EHOSTUNREACH',
+]);
+
+function detachErrorListener(target, listener) {
+  if (!listener) {
+    return;
+  }
+  try {
+    if (typeof target?.off === 'function') {
+      target.off('error', listener);
+    } else if (typeof target?.removeListener === 'function') {
+      target.removeListener('error', listener);
+    }
+  } catch {
+    // A test double may expose only part of the EventEmitter interface.
+  }
+}
+
+function attachPoolErrorHandler(pool, logger) {
+  if (typeof pool?.on !== 'function') {
+    return () => {};
+  }
+
+  let attached = false;
+  const handler = () => {
+    const writeDiagnostic = typeof logger === 'function' ? logger : console.error;
+    try {
+      const result = writeDiagnostic(POOL_ERROR_DIAGNOSTIC);
+      // A logger is normally synchronous, but never leave a rejected custom
+      // logger Promise unobserved from an EventEmitter callback.
+      if (result && typeof result.then === 'function') {
+        void Promise.resolve(result).catch(() => {});
+      }
+    } catch {
+      // An idle-client error must never become an exception from this handler.
+    }
+  };
+
+  try {
+    pool.on('error', handler);
+    attached = true;
+  } catch {
+    // Keep lightweight injected pools usable even when they only resemble an
+    // EventEmitter.
+  }
+
+  return () => {
+    if (!attached) {
+      return;
+    }
+    attached = false;
+    detachErrorListener(pool, handler);
+  };
+}
+
+function attachClientErrorHandler(client, handler) {
+  if (typeof client?.on !== 'function') {
+    return () => {};
+  }
+  let attached = false;
+  try {
+    client.on('error', handler);
+    attached = true;
+  } catch {
+    // The transaction can still rely on query rejections from a minimal test
+    // client that does not implement EventEmitter semantics.
+  }
+  return () => {
+    if (!attached) {
+      return;
+    }
+    attached = false;
+    detachErrorListener(client, handler);
+  };
+}
+
+function isClientQueryTimeout(error) {
+  return error?.code === 'QUERY_TIMEOUT'
+    || error?.message === 'Query read timeout';
+}
+
+function isBrokenTransactionClient(client, error) {
+  if (isClientQueryTimeout(error)) {
+    return true;
+  }
+  if (client?._queryable === false || client?._ending || client?._ended
+    || client?.connection?._ending || client?.connection?._ended) {
+    return true;
+  }
+  const code = String(error?.code ?? '');
+  return TRANSPORT_ERROR_CODES.has(code) || /^08\d{3}$/u.test(code);
+}
 
 function taskStorageValues(task) {
   return {
@@ -518,14 +625,18 @@ export async function createPostgresHomeworkDatabase({
   connectionString = process.env.HOMEWORK_DATABASE_URL,
   pool = null,
   ssl = undefined,
+  logger = console.error,
 } = {}) {
   const configured = configuredConnectionString(connectionString);
   const ownsPool = !pool;
   const poolOptions = {
     connectionString: configured,
     max: 2,
-    connectionTimeoutMillis: 10_000,
-    idleTimeoutMillis: 30_000,
+    connectionTimeoutMillis: POSTGRES_CONNECTION_TIMEOUT_MILLIS,
+    idleTimeoutMillis: POSTGRES_IDLE_TIMEOUT_MILLIS,
+    lock_timeout: POSTGRES_LOCK_TIMEOUT_MILLIS,
+    statement_timeout: POSTGRES_STATEMENT_TIMEOUT_MILLIS,
+    query_timeout: POSTGRES_QUERY_TIMEOUT_MILLIS,
   };
   if (ownsPool) {
     const configuredSsl = ssl ?? configuredDatabaseSsl();
@@ -535,6 +646,7 @@ export async function createPostgresHomeworkDatabase({
     }
   }
   const databasePool = pool ?? new Pool(poolOptions);
+  const detachPoolErrorHandler = attachPoolErrorHandler(databasePool, logger);
 
   async function query(text, values = []) {
     try {
@@ -546,21 +658,58 @@ export async function createPostgresHomeworkDatabase({
 
   async function withTransaction(callback) {
     let client;
+    let clientFailed = false;
+    let clientFailure = null;
+    let detachClientErrorHandler = () => {};
+    let released = false;
+
+    const releaseClient = (destroy = false) => {
+      if (released || !client) {
+        return;
+      }
+      released = true;
+      detachClientErrorHandler();
+      try {
+        if (typeof client.release !== 'function') {
+          return;
+        }
+        if (destroy) {
+          client.release(true);
+        } else {
+          client.release();
+        }
+      } catch {
+        // Preserve the original transaction error if cleanup also fails.
+      }
+    };
+
     try {
       client = await databasePool.connect();
+      detachClientErrorHandler = attachClientErrorHandler(client, (error) => {
+        clientFailed = true;
+        clientFailure ??= error;
+      });
       await client.query('BEGIN');
       const result = await callback(client);
+      if (clientFailed) {
+        throw clientFailure ?? new Error('PostgreSQL transaction client stopped unexpectedly');
+      }
       await client.query('COMMIT');
       return result;
     } catch (error) {
-      try {
-        await client?.query('ROLLBACK');
-      } catch {
-        // Preserve the original transaction error.
+      let destroyClient = clientFailed || isBrokenTransactionClient(client, error);
+      if (client && !destroyClient) {
+        try {
+          // pg applies the pool query_timeout to this cleanup statement too.
+          await client.query('ROLLBACK');
+        } catch {
+          destroyClient = true;
+        }
       }
+      releaseClient(destroyClient);
       throw wrapDatabaseError('PostgreSQL transaction failed', error);
     } finally {
-      client?.release();
+      releaseClient(clientFailed);
     }
   }
 
@@ -641,8 +790,13 @@ export async function createPostgresHomeworkDatabase({
     }
   } catch (error) {
     if (ownsPool) {
-      await databasePool.end().catch(() => {});
+      try {
+        await databasePool.end();
+      } catch {
+        // Preserve the database initialization error.
+      }
     }
+    detachPoolErrorHandler();
     throw wrapDatabaseError('Could not initialize PostgreSQL database', error);
   }
 
@@ -1489,8 +1643,13 @@ export async function createPostgresHomeworkDatabase({
       return;
     }
     closed = true;
-    if (typeof databasePool.end === 'function') {
-      await databasePool.end();
+    try {
+      if (typeof databasePool.end === 'function') {
+        await databasePool.end();
+      }
+    } finally {
+      // Keep the listener in place until pg has finished closing idle clients.
+      detachPoolErrorHandler();
     }
   }
 
