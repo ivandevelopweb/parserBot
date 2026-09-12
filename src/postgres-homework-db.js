@@ -1,4 +1,5 @@
 import pg from 'pg';
+import { readFileSync } from 'node:fs';
 
 import {
   DATABASE_VERSION,
@@ -177,6 +178,53 @@ function configuredConnectionString(value) {
     );
   }
   return connectionString;
+}
+
+function configuredDatabaseSsl() {
+  const inlineCertificate = String(process.env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
+  const certificatePath = String(process.env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
+  if (inlineCertificate && certificatePath) {
+    throw new HomeworkDatabaseError(
+      'Configure only one of HOMEWORK_DATABASE_CA_CERT or HOMEWORK_DATABASE_CA_CERT_PATH',
+      { code: 'DATABASE_CONFIG_ERROR' },
+    );
+  }
+  if (!inlineCertificate && !certificatePath) {
+    return undefined;
+  }
+  try {
+    const certificate = inlineCertificate || readFileSync(certificatePath, 'utf8');
+    if (!String(certificate).trim()) {
+      throw new Error('empty certificate');
+    }
+    return {
+      rejectUnauthorized: true,
+      ca: String(certificate),
+    };
+  } catch {
+    throw new HomeworkDatabaseError(
+      'Could not load the PostgreSQL CA certificate',
+      { code: 'DATABASE_CONFIG_ERROR' },
+    );
+  }
+}
+
+function connectionStringForExplicitSsl(connectionString, ssl) {
+  if (!ssl) {
+    return connectionString;
+  }
+  try {
+    const parsed = new URL(connectionString);
+    for (const parameter of ['ssl', 'sslmode', 'sslcert', 'sslkey', 'sslrootcert', 'uselibpqcompat']) {
+      parsed.searchParams.delete(parameter);
+    }
+    return parsed.toString();
+  } catch {
+    throw new HomeworkDatabaseError(
+      'HOMEWORK_DATABASE_URL must be a valid PostgreSQL connection string',
+      { code: 'DATABASE_CONFIG_ERROR' },
+    );
+  }
 }
 
 function wrapDatabaseError(message, error) {
@@ -469,15 +517,24 @@ async function insertManySeenTasksWithExecutor(executor, entries, {
 export async function createPostgresHomeworkDatabase({
   connectionString = process.env.HOMEWORK_DATABASE_URL,
   pool = null,
+  ssl = undefined,
 } = {}) {
   const configured = configuredConnectionString(connectionString);
   const ownsPool = !pool;
-  const databasePool = pool ?? new Pool({
+  const poolOptions = {
     connectionString: configured,
     max: 2,
     connectionTimeoutMillis: 10_000,
     idleTimeoutMillis: 30_000,
-  });
+  };
+  if (ownsPool) {
+    const configuredSsl = ssl ?? configuredDatabaseSsl();
+    if (configuredSsl) {
+      poolOptions.connectionString = connectionStringForExplicitSsl(configured, configuredSsl);
+      poolOptions.ssl = configuredSsl;
+    }
+  }
+  const databasePool = pool ?? new Pool(poolOptions);
 
   async function query(text, values = []) {
     try {

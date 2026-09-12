@@ -17,13 +17,14 @@ Developer documentation:
 
 - [Architecture and trade-offs](docs/ARCHITECTURE.md)
 - [Rules for agents and developers](AGENTS.md)
+- [Aiven PostgreSQL migration runbook](docs/aiven-migration-runbook.md)
 
 Read the architecture document before a large change. It describes layer boundaries, fingerprint and snapshot rules, the PostgreSQL lifecycle, Telegram callbacks, and current project limits.
 
 ## Requirements
 
 - Node.js `24.21.0` or a later `24.x` patch below `25`;
-- a PostgreSQL database URL (Neon is the intended hosted database);
+- a PostgreSQL database URL (Neon and Aiven are supported managed PostgreSQL providers);
 - a working Єдина школа username and password;
 - a Telegram bot token and chat id;
 - an authenticated Google Classroom browser cookie export for the Classroom web provider and local smoke-tests;
@@ -166,7 +167,9 @@ and retry trade-off. Keep the database URL,
 cookie header, and all credentials in the Render secret store; do not upload
 `.env`, cookie files, or Google credential files. A Classroom browser session
 can expire and then needs a fresh local export. Use the Neon pooled connection
-string for `HOMEWORK_DATABASE_URL` and keep connection pooling enabled. See the
+string for `HOMEWORK_DATABASE_URL` when using Neon. Aiven Free has no provider
+pooler; the application still uses its bounded two-connection `pg.Pool`, so use
+the regular Aiven Service URI with TLS. See the
 [Render Blueprint reference](https://render.com/docs/blueprint-spec) and
 [free instance documentation](https://render.com/docs/free).
 
@@ -199,8 +202,10 @@ task text, SQL parameters, cookies, tokens, or connection strings. HEAD remains
 a process/readiness check without a response body.
 
 Safe rollout/rollback: run the full test suite on Node `24.21+`, review the
-before/after synthetic benchmark, and deploy with the existing Neon schema
-version 5; this change has no migration. Keep exactly one bot owner: stop the
+before/after synthetic benchmark, and deploy with the existing PostgreSQL schema
+version 5; this change has no application-schema migration. For a provider
+change, follow [the Aiven migration runbook](docs/aiven-migration-runbook.md).
+Keep exactly one bot owner: stop the
 old `npm run bot` instance, verify its process chain has exited, then start the
 new instance. Confirm a GET `/healthz` returns ready, both provider diagnostics
 move from `unknown`, and no queue growth or duplicate messages appears during
