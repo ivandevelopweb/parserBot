@@ -34,10 +34,15 @@ function createTelegramMock() {
 test('sync interval configuration is bounded and diagnostics are kept in memory', async () => {
   assert.equal(DEFAULT_HOMEWORK_SYNC_INTERVAL_MINUTES, 20);
   assert.equal(HOMEWORK_SYNC_INTERVAL_MS, 20 * 60 * 1000);
-  assert.equal(parseHomeworkSyncIntervalMinutes(undefined), 20);
+  assert.equal(parseHomeworkSyncIntervalMinutes(null), 20);
+  assert.equal(
+    parseHomeworkSyncIntervalMinutes(),
+    parseHomeworkSyncIntervalMinutes(process.env.HOMEWORK_SYNC_INTERVAL_MINUTES ?? null),
+  );
   assert.equal(parseHomeworkSyncIntervalMinutes(''), 20);
   assert.equal(parseHomeworkSyncIntervalMinutes('  '), 20);
   assert.equal(parseHomeworkSyncIntervalMinutes('5'), 5);
+  assert.equal(parseHomeworkSyncIntervalMinutes('10'), 10);
   assert.equal(parseHomeworkSyncIntervalMinutes('20'), 20);
   assert.equal(parseHomeworkSyncIntervalMinutes('60'), 60);
   assert.throws(() => parseHomeworkSyncIntervalMinutes('4'), /from 5 to 60/);
