@@ -131,7 +131,7 @@ period; the prepared Render profile also uses `20`. An explicit server value of
 period reduces polling and database activity but can delay discovery and
 notification retries by up to one interval plus the provider cycle duration.
 At 20 minutes this is 72 planned runs per day instead of 144, excluding process
-starts; that frequency change is not proof of a twofold Neon cost reduction.
+starts; that frequency change is not proof of a twofold provider cost reduction.
 The first sync remains
 immediate, overlapping cycles are skipped, and shutdown cancels and drains the
 active cycle. The bot syncs Єдину школу and, when a Classroom cookie source is
@@ -211,7 +211,7 @@ new instance. Confirm a GET `/healthz` returns ready, both provider diagnostics
 move from `unknown`, and no queue growth or duplicate messages appears during
 the first cycles. If the new process is unhealthy, stop it and restore the
 previous application revision with the same environment and database; do not
-delete or reset PostgreSQL state. After 24–72 hours, compare Neon counters over
+delete or reset PostgreSQL state. After 24–72 hours, compare provider counters over
 an exact window and sample missed/repeated notifications before changing the
 interval again.
 
@@ -306,13 +306,15 @@ Run the repeatable local before/after benchmark on synthetic E-school and
 Classroom data (it never contacts either provider, PostgreSQL, or Telegram):
 
 ```powershell
-npm run benchmark:neon -- --label=after --output=docs/neon-benchmark-after.json --before=docs/neon-benchmark-before.json
+npm run benchmark:neon -- --label=before --output=output/benchmark-before.json
+npm run benchmark:neon -- --label=after --output=output/benchmark-after.json --before=output/benchmark-before.json
 ```
 
 The benchmark reports SQL calls, returned rows, changed rows, and UTF-8 sizes
 of JSON-serialized result rows. The byte value is only an approximation of
-returned data, not Neon wire traffic or a Neon usage counter. See the generated
-reports in `docs/` for the fixed synthetic dataset and scenarios.
+returned data, not PostgreSQL wire traffic or a provider usage counter. The
+generated JSON and Markdown reports can be kept under the ignored `output/`
+directory.
 
 ## What the smoke-test checks
 

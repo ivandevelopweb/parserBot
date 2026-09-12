@@ -357,11 +357,11 @@ When the description changes, the fingerprint changes too. `findMatch()` first l
 
 ## 6. PostgreSQL and task lifecycle
 
-The active database is a PostgreSQL database addressed by the required
-`HOMEWORK_DATABASE_URL`. Neon is the intended hosted instance. The application
-uses the pooled Neon connection string and a small `pg.Pool`; no local database
-file, Render Persistent Disk, or SQLite fallback is opened by the bot or
-`npm run sync`.
+The active database is a managed PostgreSQL database addressed by the required
+`HOMEWORK_DATABASE_URL`; the current deployment uses Aiven Free and Neon remains
+supported for rollback or another deployment. The application uses the
+provider's TLS connection and a small `pg.Pool`; no local database file, Render
+Persistent Disk, or SQLite fallback is opened by the bot or `npm run sync`.
 
 `src/homework-db.js` is the public factory and
 `src/postgres-homework-db.js` owns the schema and async repository contract.
@@ -494,7 +494,7 @@ absence reconciliation; `statusTransitions` counts Classroom status changes;
 counts successful Telegram deliveries; and `durationMs` is wall-clock time for
 the provider cycle. Classroom content and status are unioned by its
 course-qualified external id, so one assignment cannot be counted twice.
-These application metrics are not Neon billing counters.
+These application metrics are not provider billing counters.
 
 Pending tasks are not removed by age. The 14-day rule applies only to completed tasks and uses `completed_at`, not the lesson date or publication date.
 
@@ -616,8 +616,8 @@ The service is deliberately single-instance because Telegram long polling has
 one owner. PostgreSQL is remote and can handle the small pool used by this
 process, but horizontal bot replicas are still unsupported. Deployment secrets
 are entered in Render rather than committed files: the E-school credentials,
-Telegram credentials, the Neon PostgreSQL URL, and the authenticated
-`CLASSROOM_COOKIE_HEADER`.
+Telegram credentials, the managed PostgreSQL URL and any required CA
+certificate, and the authenticated `CLASSROOM_COOKIE_HEADER`.
 
 When shutdown is requested, the bot marks `/healthz` unavailable, aborts
 Telegram polling and the shared provider/delivery HTTP work, clears the
@@ -639,7 +639,7 @@ default cannot change an existing environment value. A 20-minute run may delay
 discovery or a retry by one interval plus the sync duration, gives at most 72
 planned runs per day instead of 144 (excluding process starts), and reduces
 periodic provider/database work. This frequency calculation is not proof of a
-twofold Neon cost reduction, and increasing the setting is not a substitute
+twofold provider cost reduction, and increasing the setting is not a substitute
 for the SQL batching and conditional-write changes above.
 
 #### Rollout and rollback
@@ -652,7 +652,7 @@ Telegram 409 conflict. Check a GET `/healthz`, provider state transitions from
 `unknown`, queue behavior, and task/status samples during the first cycles.
 For rollback, stop the new owner and restore the previous application revision
 with the same environment and PostgreSQL database. Do not delete, reset, or
-manually rewrite task/queue data. After 24–72 hours, compare Neon counters over
+manually rewrite task/queue data. After 24–72 hours, compare provider counters over
 an exact window together with missed/repeated notifications before tuning the
 interval.
 
@@ -667,7 +667,7 @@ interval.
 - Telegram HTML links accept only explicit `http:` or `https:` URLs without embedded credentials; unsafe provider URLs are omitted or replaced with the known E-school diary URL.
 - HTTP requests have timeouts.
 - Callbacks are accepted only for the configured chat.
-- Neon/PostgreSQL transport must use the provider's TLS connection string. Database backups, retention, and access policy remain deployment responsibilities.
+- Managed PostgreSQL transport must use the provider's TLS connection settings. Database backups, retention, and access policy remain deployment responsibilities.
 
 ## 10. Trade-offs and limitations
 
@@ -712,29 +712,30 @@ provider-aware. A single text-based deduplication rule would incorrectly merge
 identical Classroom assignments from different courses, so Classroom uses its
 course-qualified id.
 
-### Neon PostgreSQL instead of a local database file
+### Managed PostgreSQL instead of a local database file
 
 PostgreSQL keeps the bot state across Render deploys and free-service restarts
 without a paid Persistent Disk, and it gives the service one durable remote
 store. The cost is a required external database secret, network availability,
 provider limits, and an explicit schema version. The current adapter uses a
 small `pg` pool rather than an ORM; test fixtures use `pg-mem` and do not touch
-the user's Neon project.
+the user's hosted database.
 
 The migration is intentionally a clean PostgreSQL schema rather than an
 in-place SQLite migration. The bot does not read or delete the old local
 SQLite file. An optional validated `data/state.json` import preserves the
 previous JSON baseline without making a file the active store.
 
-### Neon measurement and optimization limits
+### PostgreSQL measurement and optimization limits
 
 The repository benchmark in `scripts/neon-optimization-benchmark.mjs` uses the
 same 120-task synthetic E-school/Classroom dataset for before/after runs. It
 counts SQL calls, returned rows, changed rows, and UTF-8 JSON sizes of returned
 rows. The last value is deliberately labeled approximate: it excludes protocol
-framing and is not the Neon network-transfer counter. Production savings must
-be checked after deployment using the same observation window and Neon
-dashboard counters; a local pg-mem result cannot prove a CU-hour or GB result.
+framing and is not a PostgreSQL provider's network-transfer counter. Production
+savings must be checked after deployment using the same observation window and
+the provider dashboard counters; a local pg-mem result cannot prove a CU-hour
+or GB result.
 
 The active path batches identity matching, combines Classroom content/status
 writes, bulk-inserts baseline/new rows within bounded parameter limits, and
@@ -754,7 +755,7 @@ that the free service can sleep and two bot instances still cause `409 Conflict`
 One command starts the local bot, and the sync guard prevents overlapping cycles. The cost is that stopping or crashing the process stops both Telegram UI and scheduled parsing. A 24/7 setup needs a process manager or a separate scheduler.
 
 Render supplies the process manager, but it does not solve secret rotation,
-Classroom cookie renewal, or Neon database backups/retention. Those remain
+Classroom cookie renewal, or managed PostgreSQL backups/retention. Those remain
 operational tasks.
 
 ### At-least-once delivery
@@ -793,7 +794,7 @@ Before a large change, decide how to handle these items:
   response;
 - add operational refresh/health handling for the browser cookie session.
 
-For the current project, one process, Neon PostgreSQL, and the existing bounded
+For the current project, one process, managed PostgreSQL, and the existing bounded
 authentication recovery are enough for the selected free Render deployment
 shape. This statement describes the chosen architecture, not live production
 readiness.
