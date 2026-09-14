@@ -11,6 +11,7 @@ data/*.debug.txt.tmp-*
 *.debug.txt
 coverage/
 output/
+secrets/
 google-credentials.json
 google-token.json
 google-token.json.tmp-*

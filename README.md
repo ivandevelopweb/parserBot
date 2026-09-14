@@ -71,6 +71,39 @@ Run the smoke-test:
 npm start
 ```
 
+Run the isolated E-school browser-session diagnostic. First export the
+verified E-school cookies into the local, ignored file
+`secrets/eschool-cookies.json` using the shape below:
+
+```json
+{
+  "version": 1,
+  "cookies": [
+    {
+      "name": "refresh_token",
+      "value": "PASTE_LOCALLY",
+      "domain": ".eschool-ua.com",
+      "path": "/",
+      "expires": "2026-10-31T23:59:59.000Z",
+      "secure": true,
+      "httpOnly": true,
+      "sameSite": "lax"
+    }
+  ]
+}
+```
+
+Add the `session_token` and `application_token` records, preserving their
+browser domains and paths. Diary-scoped duplicate token names are allowed;
+`cf_clearance` is optional and is not required by the diagnostic. The command
+never calls `fullLogin()`, sends no Telegram messages, and does not access
+PostgreSQL. It reports one of `RESULT_A`, `RESULT_B`, `RESULT_C`, or
+`RESULT_D` without printing cookie values:
+
+```powershell
+npm run eschool:session:diagnostic
+```
+
 Run one production sync. The first run parses the current and next week's homework immediately:
 
 The command requires `HOMEWORK_DATABASE_URL`; it never falls back to a local

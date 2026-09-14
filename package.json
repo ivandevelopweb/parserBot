@@ -14,6 +14,7 @@
     "classroom:auth": "node --disable-warning=ExperimentalWarning src/classroom-auth-cli.js",
     "classroom:smoke": "node --disable-warning=ExperimentalWarning src/classroom-smoke-cli.js",
     "classroom:courses:smoke": "node --disable-warning=ExperimentalWarning src/classroom-courses-smoke-cli.js",
+    "eschool:session:diagnostic": "node --disable-warning=ExperimentalWarning src/eschool-session-diagnostic-cli.js",
     "telegram:test": "node src/telegram-check.js",
     "benchmark:neon": "node scripts/neon-optimization-benchmark.mjs",
     "test": "node --disable-warning=ExperimentalWarning --test"

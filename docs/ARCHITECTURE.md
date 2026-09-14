@@ -47,7 +47,7 @@ other provider from running.
 
 | Layer | Files | Responsibility |
 | --- | --- | --- |
-| Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load `.env`, assemble dependencies, and start the selected mode. |
+| Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js`, `src/eschool-session-diagnostic-cli.js` | Load `.env` when needed, assemble dependencies, and start the selected mode. The E-school session diagnostic is isolated from production sync. |
 | Authentication | `src/auth.js`, `src/classroom-web.js` | Perform E-school login through the dynamic Next.js Server Action; keep E-school cookies in memory; and load the already authenticated Classroom browser cookie source. |
 | Diary client | `src/eschool.js` | Bootstrap `seplogin`, fetch the current and next weeks from Appointment API, extract homework, and deduplicate it. |
 | Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC with explicit state filters, validate the confirmed wire shapes, classify coursework status conservatively, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
@@ -76,7 +76,11 @@ other provider from running.
 4. Check for the `refresh_token` and `session_token` cookies.
 5. If needed, send `GET /portal` to receive a new `session_token`.
 
-Cookies are not written to disk. They live in the current process's `tough-cookie` jar.
+Production E-school cookies are not written to disk. They live in the current
+process's `tough-cookie` jar. The isolated
+`src/eschool-session-diagnostic-cli.js` is a separate diagnostic path that
+explicitly imports a user-provided, ignored `secrets/eschool-cookies.json`
+file into a jar; it never calls `fullLogin()` and is not used by the bot.
 
 `src/eschool.js` then bootstraps the diary API:
 
