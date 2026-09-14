@@ -1,3 +1,4 @@
+import { existsSync } from 'node:fs';
 import { readFile } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
@@ -11,7 +12,8 @@ import {
   getAppointments,
 } from './eschool.js';
 
-export const ESCHOOL_COOKIE_FILE = resolve(
+export const RENDER_ESCHOOL_COOKIE_FILE = '/etc/secrets/eschool-cookies.json';
+export const LOCAL_ESCHOOL_COOKIE_FILE = resolve(
   process.cwd(),
   'secrets',
   'eschool-cookies.json',
@@ -26,6 +28,22 @@ const REQUIRED_COOKIE_TARGETS = Object.freeze([
   { name: 'session_token', url: ESCHOOL_PARENT_COOKIE_URL },
   { name: 'application_token', url: ESCHOOL_DIARY_COOKIE_URL },
 ]);
+
+export function resolveEschoolCookieFile({
+  env = process.env,
+  fileExists = existsSync,
+} = {}) {
+  const configuredPath = env?.ESCHOOL_COOKIE_FILE;
+  if (typeof configuredPath === 'string' && configuredPath.trim().length > 0) {
+    return configuredPath;
+  }
+  if (fileExists(RENDER_ESCHOOL_COOKIE_FILE)) {
+    return RENDER_ESCHOOL_COOKIE_FILE;
+  }
+  return LOCAL_ESCHOOL_COOKIE_FILE;
+}
+
+export const ESCHOOL_COOKIE_FILE = resolveEschoolCookieFile();
 
 function isPlainObject(value) {
   return value !== null && typeof value === 'object' && !Array.isArray(value);
@@ -128,12 +146,19 @@ function normalizeCookieRecord(record, index) {
   };
 }
 
-export async function loadEschoolCookieJar(filePath = ESCHOOL_COOKIE_FILE) {
+export async function loadEschoolCookieJar(filePath = resolveEschoolCookieFile()) {
   let parsed;
   try {
     parsed = JSON.parse(await readFile(filePath, 'utf8'));
   } catch (error) {
-    throw new Error(`Could not read E-school cookie file: ${error.name ?? 'error'}`);
+    const errorCode = typeof error?.code === 'string' ? error.code : null;
+    const wrapped = new Error(
+      `Could not read E-school cookie file: ${errorCode ?? error?.name ?? 'error'}`,
+    );
+    if (errorCode) {
+      wrapped.code = errorCode;
+    }
+    throw wrapped;
   }
 
   if (!isPlainObject(parsed) || parsed.version !== COOKIE_FILE_VERSION
@@ -147,7 +172,18 @@ export async function loadEschoolCookieJar(filePath = ESCHOOL_COOKIE_FILE) {
   const records = [];
   for (const [index, record] of parsed.cookies.entries()) {
     const normalized = normalizeCookieRecord(record, index);
-    await jar.setCookie(normalized.cookie, normalized.url);
+    try {
+      await jar.setCookie(normalized.cookie, normalized.url);
+    } catch (error) {
+      const errorCode = typeof error?.code === 'string' ? error.code : null;
+      const wrapped = new Error(
+        `Could not load E-school cookie record ${index + 1}: ${errorCode ?? error?.name ?? 'error'}`,
+      );
+      if (errorCode) {
+        wrapped.code = errorCode;
+      }
+      throw wrapped;
+    }
     records.push({
       name: normalized.name,
       domain: normalized.domain,
@@ -370,11 +406,14 @@ function resolveResult({
 }
 
 export async function runEschoolSessionDiagnostic({
-  cookiePath = ESCHOOL_COOKIE_FILE,
+  cookiePath = resolveEschoolCookieFile(),
   fetchImpl = globalThis.fetch,
   logger = console.log,
+  stageReporter = () => {},
 } = {}) {
+  stageReporter('load_cookie_file');
   const { jar, records } = await loadEschoolCookieJar(cookiePath);
+  stageReporter('create_auth_client');
   const observed = observeFetch(fetchImpl);
   const auth = createAuthClient({
     fetchImpl: observed.fetchWithObservation,
@@ -383,6 +422,7 @@ export async function runEschoolSessionDiagnostic({
   });
   const noLoginAuth = withoutFullLogin(auth);
 
+  stageReporter('step_1');
   const stepOne = await inspectRequiredCookies(jar);
   logEvent(logger, 'STEP_1', {
     refresh_token_exists: stepOne.refresh_token.exists,
@@ -390,6 +430,7 @@ export async function runEschoolSessionDiagnostic({
     application_token_exists: stepOne.application_token.exists,
   });
 
+  stageReporter('step_2');
   const stepTwo = {
     attempted: stepOne.application_token.exists,
     success: false,
@@ -433,6 +474,7 @@ export async function runEschoolSessionDiagnostic({
   const portalRequestStart = observed.requests.length;
   let portalError = null;
   let portalSuccess = false;
+  stageReporter('step_3');
   try {
     await auth.refreshSession({ logOutput: false });
     portalSuccess = true;
@@ -485,6 +527,7 @@ export async function runEschoolSessionDiagnostic({
   const diaryRequestStart = observed.requests.length;
   let diarySuccess = false;
   let diaryError = null;
+  stageReporter('step_4');
   try {
     await initializeDiarySession(noLoginAuth, { force: true });
     diarySuccess = true;
@@ -522,6 +565,7 @@ export async function runEschoolSessionDiagnostic({
     error: null,
   };
   const finalRequestStart = observed.requests.length;
+  stageReporter('step_5');
   try {
     await getAppointments(noLoginAuth, { logger: () => {} });
     stepFive.success = true;
@@ -544,6 +588,7 @@ export async function runEschoolSessionDiagnostic({
     error: stepFive.error,
   });
 
+  stageReporter('resolve_result');
   const result = resolveResult({
     records,
     stepOne,
@@ -611,15 +656,24 @@ function isMainModule() {
 }
 
 if (isMainModule()) {
-  runEschoolSessionDiagnostic().then(({ code }) => {
+  let stage = 'load_cookie_file';
+  runEschoolSessionDiagnostic({
+    stageReporter: (nextStage) => {
+      stage = nextStage;
+    },
+  }).then(({ code }) => {
     if (code !== 'RESULT_A') {
       process.exitCode = 1;
     }
   }).catch((error) => {
     console.error(JSON.stringify({
       event: 'FATAL',
+      stage,
       name: typeof error?.name === 'string' ? error.name : 'Error',
       code: typeof error?.code === 'string' ? error.code : null,
+      message: typeof error?.message === 'string'
+        ? error.message.replace(/[\r\n]+/g, ' ').slice(0, 500)
+        : 'Unknown error',
     }));
     process.exitCode = 1;
   });
