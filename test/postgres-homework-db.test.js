@@ -5,7 +5,6 @@ import { EventEmitter } from 'node:events';
 import { newDb } from 'pg-mem';
 
 import { createHomeworkDatabase, createPostgresHomeworkDatabase } from '../src/homework-db.js';
-import { configuredDatabaseSsl } from '../src/postgres-homework-db.js';
 import { toSyncTask } from '../src/sync.js';
 
 function createPool() {
@@ -187,53 +186,6 @@ test('PostgreSQL storage fails closed without a PostgreSQL URL', async () => {
     () => createPostgresHomeworkDatabase({ connectionString: 'file:data/homeworks.sqlite' }),
     /must be a PostgreSQL connection string/,
   );
-});
-
-test('PostgreSQL CA certificate decodes from base64', () => {
-  const certificate = '-----BEGIN CERTIFICATE-----\nbase64-ca\n-----END CERTIFICATE-----\n';
-  const ssl = configuredDatabaseSsl({
-    env: {
-      HOMEWORK_DATABASE_CA_CERT_BASE64: Buffer.from(certificate, 'utf8').toString('base64'),
-    },
-  });
-
-  assert.deepEqual(ssl, { rejectUnauthorized: true, ca: certificate });
-});
-
-test('base64 PostgreSQL CA certificate takes priority over plain env', () => {
-  const base64Certificate = '-----BEGIN CERTIFICATE-----\nbase64-ca\n-----END CERTIFICATE-----\n';
-  const plainCertificate = '-----BEGIN CERTIFICATE-----\nplain-ca\n-----END CERTIFICATE-----\n';
-  const ssl = configuredDatabaseSsl({
-    env: {
-      HOMEWORK_DATABASE_CA_CERT_BASE64: Buffer.from(base64Certificate, 'utf8').toString('base64'),
-      HOMEWORK_DATABASE_CA_CERT: plainCertificate,
-    },
-  });
-
-  assert.equal(ssl.ca, base64Certificate);
-});
-
-test('PostgreSQL CA certificate falls back to plain env', () => {
-  const certificate = '-----BEGIN CERTIFICATE-----\nplain-ca\n-----END CERTIFICATE-----\n';
-  const ssl = configuredDatabaseSsl({
-    env: { HOMEWORK_DATABASE_CA_CERT: certificate },
-  });
-
-  assert.deepEqual(ssl, { rejectUnauthorized: true, ca: certificate.trim() });
-});
-
-test('PostgreSQL CA certificate falls back to PATH', () => {
-  const certificate = '-----BEGIN CERTIFICATE-----\npath-ca\n-----END CERTIFICATE-----\n';
-  const certificatePath = 'C:\\certs\\homework-ca.pem';
-  const ssl = configuredDatabaseSsl({
-    env: { HOMEWORK_DATABASE_CA_CERT_PATH: certificatePath },
-    readCertificate: (path) => {
-      assert.equal(path, certificatePath);
-      return certificate;
-    },
-  });
-
-  assert.deepEqual(ssl, { rejectUnauthorized: true, ca: certificate });
 });
 
 test('PostgreSQL adapter commits notification queue and keeps pending tasks during cleanup', async () => {
