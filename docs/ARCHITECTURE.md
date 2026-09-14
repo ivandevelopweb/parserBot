@@ -659,8 +659,14 @@ The service is deliberately single-instance because Telegram long polling has
 one owner. PostgreSQL is remote and can handle the small pool used by this
 process, but horizontal bot replicas are still unsupported. Deployment secrets
 are entered in Render rather than committed files: the E-school credentials,
-Telegram credentials, the managed PostgreSQL URL and any required CA
-certificate, and the authenticated `CLASSROOM_COOKIE_HEADER`.
+Telegram credentials, the managed PostgreSQL URL, and the authenticated
+`CLASSROOM_COOKIE_HEADER`. A reviewed Aiven CA certificate may be bundled at
+`./certs/aiven-ca.pem` for deployments such as Back4app.
+PostgreSQL CA loading prefers `HOMEWORK_DATABASE_CA_CERT_BASE64` (decoded as
+UTF-8 PEM), then `HOMEWORK_DATABASE_CA_CERT`, then
+`HOMEWORK_DATABASE_CA_CERT_PATH`, then `./certs/aiven-ca.pem` when it exists;
+TLS certificate verification remains enabled. Back4app can leave all CA
+variables unset and use the bundled file.
 
 When shutdown is requested, the bot marks `/healthz` unavailable, aborts
 Telegram polling and the shared provider/delivery HTTP work, clears the

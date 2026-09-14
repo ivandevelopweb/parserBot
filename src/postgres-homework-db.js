@@ -1,5 +1,5 @@
 import pg from 'pg';
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 import {
   DATABASE_VERSION,
@@ -55,6 +55,7 @@ const POSTGRES_IDLE_TIMEOUT_MILLIS = 30_000;
 const POSTGRES_LOCK_TIMEOUT_MILLIS = 5_000;
 const POSTGRES_STATEMENT_TIMEOUT_MILLIS = 20_000;
 const POSTGRES_QUERY_TIMEOUT_MILLIS = 25_000;
+const DEFAULT_DATABASE_CA_CERT_PATH = './certs/aiven-ca.pem';
 const POOL_ERROR_DIAGNOSTIC = '[database] PostgreSQL pool reported an idle-client error; pg removed the connection';
 const TRANSPORT_ERROR_CODES = new Set([
   'ECONNABORTED',
@@ -287,20 +288,28 @@ function configuredConnectionString(value) {
   return connectionString;
 }
 
-function configuredDatabaseSsl() {
-  const inlineCertificate = String(process.env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
-  const certificatePath = String(process.env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
-  if (inlineCertificate && certificatePath) {
+export function configuredDatabaseSsl({
+  env = process.env,
+  readCertificate = (path) => readFileSync(path, 'utf8'),
+  fileExists = existsSync,
+} = {}) {
+  const base64Certificate = String(env.HOMEWORK_DATABASE_CA_CERT_BASE64 ?? '').trim();
+  const inlineCertificate = String(env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
+  const certificatePath = String(env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
+  if (!base64Certificate && inlineCertificate && certificatePath) {
     throw new HomeworkDatabaseError(
       'Configure only one of HOMEWORK_DATABASE_CA_CERT or HOMEWORK_DATABASE_CA_CERT_PATH',
       { code: 'DATABASE_CONFIG_ERROR' },
     );
   }
-  if (!inlineCertificate && !certificatePath) {
+  if (!base64Certificate && !inlineCertificate && !certificatePath
+    && !fileExists(DEFAULT_DATABASE_CA_CERT_PATH)) {
     return undefined;
   }
   try {
-    const certificate = inlineCertificate || readFileSync(certificatePath, 'utf8');
+    const certificate = base64Certificate
+      ? Buffer.from(base64Certificate, 'base64').toString('utf8')
+      : inlineCertificate || readCertificate(certificatePath || DEFAULT_DATABASE_CA_CERT_PATH);
     if (!String(certificate).trim()) {
       throw new Error('empty certificate');
     }

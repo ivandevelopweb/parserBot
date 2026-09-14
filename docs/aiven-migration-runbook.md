@@ -11,7 +11,7 @@
 ## Что нужно сделать владельцу аккаунта
 
 1. Убедиться, что Aiven-сервис запущен, выбран тариф `Free`, база назначения пустая, а подключение разрешено с компьютера и Render.
-2. Скачать в Aiven `Overview → Connection information → CA certificate → Download` и сохранить сертификат локально, например в `C:\Temp\homeworkparser-aiven-ca.pem`. Не вставлять сертификат в чат и не коммитить его.
+2. Скачать в Aiven `Overview → Connection information → CA certificate → Download` и сохранить сертификат локально, например в `C:\Temp\homeworkparser-aiven-ca.pem`. Не вставлять сертификат в чат. Для Back4app проверенный сертификат можно разместить в репозитории как `certs/aiven-ca.pem`.
 3. Временно сохранить две строки подключения и путь к CA-сертификату в локальном `.env`. Файл уже исключён из Git; строки нельзя отправлять в чат или коммитить:
 
    ```dotenv
@@ -74,7 +74,7 @@ npm test
 
 1. В локальном `.env` заменить значение `HOMEWORK_DATABASE_URL` на Aiven Service URI.
 2. Удалить временные `SOURCE_DATABASE_URL` и `AIVEN_DATABASE_URL`, если они больше не нужны локально.
-3. В Render изменить `HOMEWORK_DATABASE_URL` на тот же Aiven URI и добавить `HOMEWORK_DATABASE_CA_CERT` со всем содержимым скачанного CA-файла. Для Render не использовать путь `HOMEWORK_DATABASE_CA_CERT_PATH`, потому что локальный путь там отсутствует.
+3. В Render изменить `HOMEWORK_DATABASE_URL` на тот же Aiven URI и добавить `HOMEWORK_DATABASE_CA_CERT` со всем содержимым скачанного CA-файла. Для Render не использовать путь `HOMEWORK_DATABASE_CA_CERT_PATH`, потому что локальный путь там отсутствует. В Back4app оставить CA-переменные unset: приложение использует `./certs/aiven-ca.pem`.
 4. Сохранить изменения и выполнить один restart/deploy.
 5. Не запускать второй bot-процесс. Telegram long polling должен иметь одного владельца.
 
