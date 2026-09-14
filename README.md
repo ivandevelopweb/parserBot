@@ -52,6 +52,13 @@ HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
 HOMEWORK_SYNC_INTERVAL_MINUTES=20  # integer from 5 to 60; explicit values override the default
 ```
 
+If PostgreSQL requires a custom CA certificate, use
+`HOMEWORK_DATABASE_CA_CERT_BASE64` for a base64-encoded PEM when the deployment
+platform flattens multiline environment values. If it is not set, the
+application falls back to `HOMEWORK_DATABASE_CA_CERT`, then to
+`HOMEWORK_DATABASE_CA_CERT_PATH`. TLS certificate verification remains enabled;
+never commit certificate contents.
+
 For the local Classroom web smoke-test, export cookies from an already
 authenticated classroom.google.com browser session and either set
 CLASSROOM_COOKIE_HEADER to its Cookie header value, set CLASSROOM_COOKIES_JSON,

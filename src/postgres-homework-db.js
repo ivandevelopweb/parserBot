@@ -287,20 +287,26 @@ function configuredConnectionString(value) {
   return connectionString;
 }
 
-function configuredDatabaseSsl() {
-  const inlineCertificate = String(process.env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
-  const certificatePath = String(process.env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
-  if (inlineCertificate && certificatePath) {
+export function configuredDatabaseSsl({
+  env = process.env,
+  readCertificate = (path) => readFileSync(path, 'utf8'),
+} = {}) {
+  const base64Certificate = String(env.HOMEWORK_DATABASE_CA_CERT_BASE64 ?? '').trim();
+  const inlineCertificate = String(env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
+  const certificatePath = String(env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
+  if (!base64Certificate && inlineCertificate && certificatePath) {
     throw new HomeworkDatabaseError(
       'Configure only one of HOMEWORK_DATABASE_CA_CERT or HOMEWORK_DATABASE_CA_CERT_PATH',
       { code: 'DATABASE_CONFIG_ERROR' },
     );
   }
-  if (!inlineCertificate && !certificatePath) {
+  if (!base64Certificate && !inlineCertificate && !certificatePath) {
     return undefined;
   }
   try {
-    const certificate = inlineCertificate || readFileSync(certificatePath, 'utf8');
+    const certificate = base64Certificate
+      ? Buffer.from(base64Certificate, 'base64').toString('utf8')
+      : inlineCertificate || readCertificate(certificatePath);
     if (!String(certificate).trim()) {
       throw new Error('empty certificate');
     }

@@ -661,6 +661,9 @@ process, but horizontal bot replicas are still unsupported. Deployment secrets
 are entered in Render rather than committed files: the E-school credentials,
 Telegram credentials, the managed PostgreSQL URL and any required CA
 certificate, and the authenticated `CLASSROOM_COOKIE_HEADER`.
+PostgreSQL CA loading prefers `HOMEWORK_DATABASE_CA_CERT_BASE64` (decoded as
+UTF-8 PEM), then `HOMEWORK_DATABASE_CA_CERT`, then
+`HOMEWORK_DATABASE_CA_CERT_PATH`; TLS certificate verification remains enabled.
 
 When shutdown is requested, the bot marks `/healthz` unavailable, aborts
 Telegram polling and the shared provider/delivery HTTP work, clears the
