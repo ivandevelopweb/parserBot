@@ -22,7 +22,7 @@ test('Render runtime contract is Node 24.21+ with free Postgres-backed web servi
 
   const envExample = readFileSync(new URL('../.env.example', import.meta.url), 'utf8');
   assert.match(envExample, /HOMEWORK_DATABASE_URL=/);
-  assert.match(envExample, /HOMEWORK_SYNC_INTERVAL_MINUTES=20/);
+  assert.match(envExample, /HOMEWORK_SYNC_INTERVAL_MINUTES=10/);
   assert.doesNotMatch(envExample, /HOMEWORK_DATABASE_PATH/u);
 });
 

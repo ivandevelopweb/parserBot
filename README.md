@@ -10,7 +10,7 @@ A small Node.js client that can:
 6. import eligible Google Classroom coursework into the same task store as Єдина школа;
 7. sync new and changed homework from both sources to Telegram;
 8. provide current and completed homework screens in one Telegram interface;
-9. run an automatic sync every 20 minutes by default (configurable from 5 to
+9. run an automatic sync every 10 minutes by default (configurable from 5 to
    60 minutes).
 
 Developer documentation:
@@ -49,7 +49,7 @@ CLASSROOM_COOKIES_JSON=
 CLASSROOM_COOKIES_FILE=classroom-cookies.json
 CLASSROOM_COURSE_ID=544644036115  # only for the single-course smoke-test
 HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
-HOMEWORK_SYNC_INTERVAL_MINUTES=20  # integer from 5 to 60; explicit values override the default
+HOMEWORK_SYNC_INTERVAL_MINUTES=10  # integer from 5 to 60; explicit values override the default
 ```
 
 If PostgreSQL requires a custom CA certificate, use
@@ -164,15 +164,16 @@ Run the long-lived Telegram bot and scheduler:
 npm run bot
 ```
 
-`npm run bot` runs one sync immediately, repeats it every 20 minutes by default,
+`npm run bot` runs one sync immediately, repeats it every 10 minutes by default,
 and handles Telegram commands in parallel. Set
 `HOMEWORK_SYNC_INTERVAL_MINUTES` to an integer from `5` to `60` to change the
-period; the prepared Render profile also uses `20`. An explicit server value of
-`10` remains an override and must be changed to `20` during rollout. A longer
-period reduces polling and database activity but can delay discovery and
-notification retries by up to one interval plus the provider cycle duration.
-At 20 minutes this is 72 planned runs per day instead of 144, excluding process
-starts; that frequency change is not proof of a twofold provider cost reduction.
+period; the application default is `10`, while the prepared Render profile
+explicitly uses `20`. A longer period reduces polling and database activity but
+can delay discovery and notification retries by up to one interval plus the
+provider cycle duration. At the 10-minute application default there are at most
+144 planned runs per day; the Render 20-minute override gives 72, excluding
+process starts. That frequency change is not proof of a twofold provider cost
+reduction.
 The first sync remains
 immediate, overlapping cycles are skipped, and shutdown cancels and drains the
 active cycle. The bot syncs Єдину школу and, when a Classroom cookie source is
