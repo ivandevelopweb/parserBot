@@ -194,8 +194,10 @@ snapshot remains in PostgreSQL.
 ### Render deployment
 
 The repository includes [`render.yaml`](render.yaml) for one free Render Web
-Service. It runs `npm run bot`, exposes `/healthz`, and stores all durable bot
-state in PostgreSQL. No Render Persistent Disk or local SQLite file is used.
+Service. It runs `npm run bot`, starts the `/healthz` server before the initial
+sync, and stores all durable bot state in PostgreSQL. The server listens on
+`process.env.PORT` or `8080` and binds to `0.0.0.0`. No Render Persistent Disk
+or local SQLite file is used.
 The Blueprint pins Node.js `24.21.0`, installs dev dependencies for the build,
 runs `npm test`, and removes them before the service starts.
 

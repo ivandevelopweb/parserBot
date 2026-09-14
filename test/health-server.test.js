@@ -8,6 +8,27 @@ async function get(server, path) {
   return fetch(`http://127.0.0.1:${address.port}${path}`);
 }
 
+test('health server uses PORT and binds all interfaces', async () => {
+  const previousPort = process.env.PORT;
+  process.env.PORT = '0';
+  let server;
+  try {
+    server = await startHealthServer();
+    const address = server.server.address();
+    assert.equal(address.address, '0.0.0.0');
+    assert.ok(address.port > 0);
+    assert.equal((await get(server, HEALTH_PATH)).status, 200);
+    assert.equal((await fetch(`http://127.0.0.1:${address.port}${HEALTH_PATH}`, { method: 'HEAD' })).status, 200);
+  } finally {
+    await server?.close();
+    if (previousPort === undefined) {
+      delete process.env.PORT;
+    } else {
+      process.env.PORT = previousPort;
+    }
+  }
+});
+
 test('sync diagnostics report degradation without changing process readiness', async () => {
   let fail = false;
   const server = await startHealthServer({

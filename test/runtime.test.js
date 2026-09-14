@@ -25,3 +25,11 @@ test('Render runtime contract is Node 24.21+ with free Postgres-backed web servi
   assert.match(envExample, /HOMEWORK_SYNC_INTERVAL_MINUTES=20/);
   assert.doesNotMatch(envExample, /HOMEWORK_DATABASE_PATH/u);
 });
+
+test('bot starts the health server before database and initial sync setup', () => {
+  const botCli = readFileSync(new URL('../src/bot-cli.js', import.meta.url), 'utf8');
+  const healthStart = botCli.indexOf('healthServer = await startHealthServer');
+  const databaseStart = botCli.indexOf('database = await createHomeworkDatabase');
+  assert.ok(healthStart >= 0);
+  assert.ok(databaseStart > healthStart, 'health server must start before database and initial sync');
+});

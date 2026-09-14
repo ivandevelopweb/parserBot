@@ -11,13 +11,13 @@ function parsePort(value) {
 }
 
 export async function startHealthServer({
-  port = process.env.PORT,
+  port = process.env.PORT || 8080,
   host = '0.0.0.0',
   readiness = () => true,
   diagnostics,
 } = {}) {
   if (port === undefined || port === null || String(port).trim() === '') {
-    throw new Error('PORT is required for the Render web service');
+    throw new Error('Health server port is required');
   }
 
   const server = createServer(async (request, response) => {

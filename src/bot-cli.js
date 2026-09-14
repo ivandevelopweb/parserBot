@@ -9,7 +9,6 @@ import { createTelegramClient, DEFAULT_TELEGRAM_TIMEOUT_MS } from './telegram.js
 import { errorMessage } from './utils.js';
 
 async function main() {
-  const auth = createAuthClient();
   let database;
   let healthServer;
   let bot;
@@ -27,6 +26,11 @@ async function main() {
   process.once('SIGTERM', shutdown);
 
   try {
+    healthServer = await startHealthServer({
+      readiness: () => !shuttingDown,
+      diagnostics: () => bot?.getDiagnostics(),
+    });
+    const auth = createAuthClient();
     database = await createHomeworkDatabase();
     const classroom = createConfiguredClassroomClient({ logger: console.log });
     const telegram = createTelegramClient({
@@ -38,12 +42,6 @@ async function main() {
       database,
       classroom,
     });
-    healthServer = process.env.PORT
-      ? await startHealthServer({
-        readiness: () => !shuttingDown,
-        diagnostics: () => bot.getDiagnostics(),
-      })
-      : null;
     await bot.start();
   } finally {
     bot?.stop();
