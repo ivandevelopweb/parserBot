@@ -7,6 +7,7 @@ import makeFetchCookie from 'fetch-cookie';
 import { Cookie, CookieJar } from 'tough-cookie';
 
 import { ConfigError, SmokeTestError, normalizeDescription } from './utils.js';
+import { parseClassroomAuthuserIndex } from './classroom-url.js';
 
 export const CLASSROOM_ORIGIN = 'https://classroom.google.com';
 export const CLASSROOM_HOME_PATH = '/a/not-turned-in/all';
@@ -34,6 +35,38 @@ export const CLASSROOM_NOT_TURNED_IN_STATES = Object.freeze([1, 2]);
 export const CLASSROOM_TURNED_IN_STATES = Object.freeze([3, 4, 8, 10, 5, 7, 9, 6, 11]);
 export const CLASSROOM_COMPLETED_STATES = Object.freeze([3, 4, 5, 6, 7, 9, 11]);
 export const CLASSROOM_UNKNOWN_STATES = Object.freeze([8, 10]);
+
+function normalizeAuthuserIndex(value) {
+  const normalized = String(value ?? '').trim();
+  if (!normalized) {
+    return null;
+  }
+  const index = parseClassroomAuthuserIndex(normalized);
+  if (index === null) {
+    throw new ConfigError('CLASSROOM_AUTHUSER_INDEX must be an integer from 0 through 10.');
+  }
+  return index;
+}
+
+function classroomPathForAuthuser(path, authuserIndex) {
+  const normalizedPath = String(path ?? '/');
+  if (authuserIndex === null || authuserIndex === undefined) {
+    return normalizedPath;
+  }
+  const rootedPath = normalizedPath.startsWith('/') ? normalizedPath : `/${normalizedPath}`;
+  const prefix = `/u/${authuserIndex}`;
+  return rootedPath === prefix || rootedPath.startsWith(`${prefix}/`)
+    ? rootedPath
+    : `${prefix}${rootedPath}`;
+}
+
+function unscopedClassroomPath(path) {
+  return String(path ?? '/').replace(/^\/u\/\d+(?=\/|$)/u, '') || '/';
+}
+
+function classroomUrlForAuthuser(path, authuserIndex) {
+  return new URL(classroomPathForAuthuser(path, authuserIndex), CLASSROOM_ORIGIN).toString();
+}
 
 const BOOTSTRAP_KEY_ALIASES = Object.freeze({
   at: ['at', 'SNlM0e'],
@@ -249,6 +282,9 @@ export function parseClassroomCookieHeader(header) {
       value,
       domain: 'classroom.google.com',
       path: '/',
+      // Cookie headers omit attributes; Google's __Secure- prefix still lets
+      // tough-cookie retain these cookies for the later RPC request.
+      secure: name.startsWith('__Secure-'),
     });
   }
 
@@ -1917,10 +1953,14 @@ export async function callClassroomRpc({
     throw new ClassroomBootstrapError();
   }
 
-  const requestUrl = new URL(CLASSROOM_RPC_PATH, CLASSROOM_ORIGIN);
+  const requestSourcePath = classroomPathForAuthuser(sourcePath, client.authuserIndex);
+  const requestUrl = new URL(
+    classroomPathForAuthuser(CLASSROOM_RPC_PATH, client.authuserIndex),
+    CLASSROOM_ORIGIN,
+  );
   const query = {
     rpcids: String(rpcid),
-    'source-path': sourcePath,
+    'source-path': requestSourcePath,
     'f.sid': session.fSid,
     bl: session.bl,
     hl: 'uk',
@@ -1966,7 +2006,7 @@ export async function callClassroomRpc({
 
   const requestDiagnostics = {
     rpcid: String(rpcid),
-    sourcePath: String(sourcePath),
+    sourcePath: requestSourcePath,
     fReqLength: fReq.length,
     fReqContainsCourseId: hasValue(expectedCourseId)
       ? fReq.includes(String(expectedCourseId))
@@ -1979,8 +2019,8 @@ export async function callClassroomRpc({
     query: {
       rpcids: { browser: String(rpcid), node: String(rpcid), matches: true },
       sourcePath: {
-        browser: String(sourcePath),
-        node: String(sourcePath),
+        browser: requestSourcePath,
+        node: requestSourcePath,
         matches: true,
       },
       fSid: { browser: 'current authenticated bootstrap', node: 'configured', matches: Boolean(bootstrapFromAuthenticatedPage && hasValue(session.fSid)) },
@@ -2295,6 +2335,7 @@ export async function getCourses(client, { signal } = {}) {
 
 export function createClassroomWebClient({
   env = process.env,
+  authuserIndex = env?.CLASSROOM_AUTHUSER_INDEX,
   cookies,
   cookieHeader,
   cookiesJson,
@@ -2311,6 +2352,8 @@ export function createClassroomWebClient({
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
     throw new ConfigError('Classroom HTTP timeout must be a positive number');
   }
+
+  const normalizedAuthuserIndex = normalizeAuthuserIndex(authuserIndex);
 
   const configuredCookieHeader = cookieHeader !== undefined
     ? cookieHeader
@@ -2341,16 +2384,18 @@ export function createClassroomWebClient({
     }
 
     const cookieHeader = new Headers(headers ?? {}).get('cookie') ?? '';
-    if (normalizedMethod === 'GET' && parsedUrl.pathname === CLASSROOM_HOME_PATH) {
+    const unscopedPath = unscopedClassroomPath(parsedUrl.pathname);
+    if (normalizedMethod === 'GET' && unscopedPath === CLASSROOM_HOME_PATH) {
       state.cookieRequests.get = summarizeCookieHeader(cookieHeader);
     }
-    if (normalizedMethod === 'POST' && parsedUrl.pathname === CLASSROOM_RPC_PATH) {
+    if (normalizedMethod === 'POST' && unscopedPath === CLASSROOM_RPC_PATH) {
       state.cookieRequests.post = summarizeCookieHeader(cookieHeader);
     }
   }
 
   const client = {
     timeoutMs,
+    authuserIndex: normalizedAuthuserIndex,
     requestIdFactory,
     supportsStateFilters: true,
     async initialize() {
@@ -2449,13 +2494,17 @@ export function createClassroomWebClient({
           'User-Agent': CLASSROOM_BROWSER_USER_AGENT,
         },
       };
+      const authenticatedPageUrl = classroomUrlForAuthuser(
+        CLASSROOM_HOME_PATH,
+        client.authuserIndex,
+      );
       let response;
-      let finalUrl = CLASSROOM_HOME_URL;
-      let redirectChain = [safeUrl(CLASSROOM_HOME_URL)];
+      let finalUrl = authenticatedPageUrl;
+      let redirectChain = [safeUrl(authenticatedPageUrl)];
       if (rawCookieHeader && !state.rawCookieHeaderImported) {
         const rawResult = await fetchWithRawCookieHeader({
           fetchImpl,
-          url: CLASSROOM_HOME_URL,
+          url: authenticatedPageUrl,
           init: requestInit,
           cookieHeader: rawCookieHeader,
           timeoutMs,
@@ -2465,8 +2514,8 @@ export function createClassroomWebClient({
         finalUrl = rawResult.finalUrl;
         redirectChain = rawResult.redirectChain;
       } else {
-        response = await client.request(CLASSROOM_HOME_URL, requestInit);
-        finalUrl = response?.url || CLASSROOM_HOME_URL;
+        response = await client.request(authenticatedPageUrl, requestInit);
+        finalUrl = response?.url || authenticatedPageUrl;
         const safeFinalUrl = safeUrl(finalUrl);
         if (safeFinalUrl !== redirectChain[0]) {
           redirectChain.push(safeFinalUrl);
@@ -2506,7 +2555,11 @@ export function createClassroomWebClient({
       // the raw Cookie-header import and its jar semantics in one place.
       await client.getAuthenticatedPage({ signal });
 
-      const response = await client.request(CLASSROOM_COURSES_URL, {
+      const coursesUrl = classroomUrlForAuthuser(
+        CLASSROOM_COURSES_PATH,
+        client.authuserIndex,
+      );
+      const response = await client.request(coursesUrl, {
         signal,
         headers: {
           Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
@@ -2514,7 +2567,7 @@ export function createClassroomWebClient({
           'User-Agent': CLASSROOM_BROWSER_USER_AGENT,
         },
       });
-      const finalUrl = response?.url || CLASSROOM_COURSES_URL;
+      const finalUrl = response?.url || coursesUrl;
       const html = await response.text();
       assertAuthenticatedPageAtUrl(response, html, finalUrl);
       const bootstrap = extractClassroomBootstrap(html);

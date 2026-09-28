@@ -209,10 +209,13 @@ test('raw Classroom Cookie header is sent unchanged on the first GET before jar 
 test('Classroom RPC reuses imported Cookie header and reports GET/POST parity safely', async () => {
   const directory = await mkdtemp(join(tmpdir(), 'classroom-rpc-cookie-parity-'));
   const artifactPath = join(directory, 'response.debug.txt');
-  const rawHeader = 'SID=sid-value; PREF=one=two';
+  const rawHeader = 'SID=sid-value; PREF=one=two; __Secure-1PSID=secure-session-value';
   const calls = [];
   const client = createClassroomWebClient({
-    env: { CLASSROOM_COOKIE_HEADER: rawHeader },
+    env: {
+      CLASSROOM_COOKIE_HEADER: rawHeader,
+      CLASSROOM_AUTHUSER_INDEX: '1',
+    },
     fetchImpl: async (url, init) => {
       calls.push({ url, init });
       if (calls.length === 1) {
@@ -235,17 +238,23 @@ test('Classroom RPC reuses imported Cookie header and reports GET/POST parity sa
     });
     const cookieDiagnostics = result.rpcDiagnostics.cookies;
     const postCookieHeader = new Headers(calls[1].init.headers).get('cookie');
+    const getUrl = new URL(calls[0].url);
+    const postUrl = new URL(calls[1].url);
 
     assert.deepEqual(cookieDiagnostics.get, {
-      count: 2,
+      count: 3,
       length: rawHeader.length,
     });
-    assert.equal(cookieDiagnostics.post.count, 2);
+    assert.equal(cookieDiagnostics.post.count, 3);
     assert.equal(cookieDiagnostics.post.length > 0, true);
     assert.equal(cookieDiagnostics.sameNames, true);
     assert.equal(typeof cookieDiagnostics.sameHeader, 'boolean');
     assert.equal(postCookieHeader.includes('sid-value'), true);
     assert.equal(postCookieHeader.includes('one=two'), true);
+    assert.equal(postCookieHeader.includes('__Secure-1PSID=secure-session-value'), true);
+    assert.equal(getUrl.pathname, '/u/1/a/not-turned-in/all');
+    assert.equal(postUrl.pathname, '/u/1/_/ClassroomUi/data/batchexecute');
+    assert.equal(postUrl.searchParams.get('source-path'), '/u/1/a/not-turned-in/all');
     assert.equal(result.rpcDiagnostics.request.bootstrapFromAuthenticatedPage, true);
   } finally {
     await rm(directory, { recursive: true, force: true });

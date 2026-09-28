@@ -290,12 +290,22 @@ function configuredConnectionString(value) {
 
 export function configuredDatabaseSsl({
   env = process.env,
+  connectionString = env.HOMEWORK_DATABASE_URL,
   readCertificate = (path) => readFileSync(path, 'utf8'),
   fileExists = existsSync,
 } = {}) {
   const base64Certificate = String(env.HOMEWORK_DATABASE_CA_CERT_BASE64 ?? '').trim();
   const inlineCertificate = String(env.HOMEWORK_DATABASE_CA_CERT ?? '').trim();
   const certificatePath = String(env.HOMEWORK_DATABASE_CA_CERT_PATH ?? '').trim();
+  let localDatabase = false;
+  try {
+    const hostname = new URL(String(connectionString ?? '')).hostname
+      .toLowerCase()
+      .replace(/^\[|\]$/gu, '');
+    localDatabase = ['localhost', '127.0.0.1', '::1'].includes(hostname);
+  } catch {
+    // Keep the existing certificate behavior for URLs that are not parseable here.
+  }
   if (!base64Certificate && inlineCertificate && certificatePath) {
     throw new HomeworkDatabaseError(
       'Configure only one of HOMEWORK_DATABASE_CA_CERT or HOMEWORK_DATABASE_CA_CERT_PATH',
@@ -303,7 +313,7 @@ export function configuredDatabaseSsl({
     );
   }
   if (!base64Certificate && !inlineCertificate && !certificatePath
-    && !fileExists(DEFAULT_DATABASE_CA_CERT_PATH)) {
+    && (localDatabase || !fileExists(DEFAULT_DATABASE_CA_CERT_PATH))) {
     return undefined;
   }
   try {
@@ -648,7 +658,7 @@ export async function createPostgresHomeworkDatabase({
     query_timeout: POSTGRES_QUERY_TIMEOUT_MILLIS,
   };
   if (ownsPool) {
-    const configuredSsl = ssl ?? configuredDatabaseSsl();
+    const configuredSsl = ssl ?? configuredDatabaseSsl({ connectionString: configured });
     if (configuredSsl) {
       poolOptions.connectionString = connectionStringForExplicitSsl(configured, configuredSsl);
       poolOptions.ssl = configuredSsl;

@@ -24,7 +24,7 @@ Read the architecture document before a large change. It describes layer boundar
 ## Requirements
 
 - Node.js `24.21.0` or a later `24.x` patch below `25`;
-- a PostgreSQL database URL (Neon and Aiven are supported managed PostgreSQL providers);
+- a PostgreSQL database URL. Local development can use the bundled Docker Compose service; Neon and Aiven are supported managed providers;
 - a working Єдина школа username and password;
 - a Telegram bot token and chat id;
 - an authenticated Google Classroom browser cookie export for the Classroom web provider and local smoke-tests;
@@ -47,10 +47,25 @@ TELEGRAM_CHAT_ID=your_chat_id
 CLASSROOM_COOKIE_HEADER=
 CLASSROOM_COOKIES_JSON=
 CLASSROOM_COOKIES_FILE=classroom-cookies.json
+CLASSROOM_AUTHUSER_INDEX=
 CLASSROOM_COURSE_ID=544644036115  # only for the single-course smoke-test
-HOMEWORK_DATABASE_URL=postgresql://user:password@host/database?sslmode=require
+LOCAL_POSTGRES_DB=parserbot
+LOCAL_POSTGRES_USER=parserbot
+LOCAL_POSTGRES_PASSWORD=replace-with-a-long-random-password
+LOCAL_POSTGRES_PORT=15432
+HOMEWORK_DATABASE_URL=postgresql://parserbot:replace-with-a-long-random-password@127.0.0.1:15432/parserbot
 HOMEWORK_SYNC_INTERVAL_MINUTES=10  # integer from 5 to 60; explicit values override the default
 ```
+
+Start the local PostgreSQL service with `docker compose up -d postgres`. It is
+available only on `127.0.0.1:15432` and stores its data in the named
+`parserbot-local-postgres-data` volume. Keep the password in `.env` the same in
+`LOCAL_POSTGRES_PASSWORD` and `HOMEWORK_DATABASE_URL`. The bot and sync command
+both use that URL. Stop the service with `docker compose stop postgres`; avoid
+`docker compose down -v` if you want to keep the local database volume.
+
+For a managed database, replace `HOMEWORK_DATABASE_URL` with the provider URL.
+The local Compose service is only needed for local development.
 
 If PostgreSQL requires a custom CA certificate, use
 `HOMEWORK_DATABASE_CA_CERT_BASE64` for a base64-encoded PEM when the deployment
@@ -65,6 +80,10 @@ authenticated classroom.google.com browser session and either set
 CLASSROOM_COOKIE_HEADER to its Cookie header value, set CLASSROOM_COOKIES_JSON,
 or save the JSON export as classroom-cookies.json. The header is treated as a
 local secret and is never logged.
+If the authenticated browser uses a route such as `/u/1/`, set
+`CLASSROOM_AUTHUSER_INDEX=1` so the web client uses the same account-scoped
+page and RPC paths. The value must match the browser's current Google account
+order (`0` through `10`).
 The cookie file is local-only and must never be committed.
 
 The production Classroom path uses the web smoke-test client through the common

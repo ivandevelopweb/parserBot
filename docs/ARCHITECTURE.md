@@ -149,16 +149,20 @@ with a safe configuration log and the E-school provider can continue.
 JSON/file sources. Header pairs are imported for `classroom.google.com` into a
 `tough-cookie` jar only after the initial page request; that first request sends
 the configured header as the exact HTTP `Cookie` header to preserve browser
-semantics. Cookie values and auth-cookie names are never logged. Redirects are
+semantics. The parser preserves Google's `__Secure-` prefix when importing
+header pairs, so secure session cookies are not silently discarded before the
+RPC POST. Cookie values and auth-cookie names are never logged. Redirects are
 followed manually for that first request so only sanitized host/path values can
 appear in diagnostics.
 
 The client first requests `/a/not-turned-in/all` and treats a Google login page,
-401, or 403 as an expired browser session. It extracts `at`, `f.sid`, and `bl`
-from structured bootstrap data when available, with a direct DOM/script fallback
-for compatible pages. `_reqid` is generated per request. The RPC helper sends
-the form-encoded `f.req` and `at`, handles XSSI and length-prefixed
-batchexecute frames, and recursively decodes nested JSON.
+401, or 403 as an expired browser session. When `CLASSROOM_AUTHUSER_INDEX=N` is
+configured, it scopes the bootstrap page, RPC endpoint, and `source-path` to
+`/u/N/`; when unset, the unscoped paths remain in use. It extracts `at`,
+`f.sid`, and `bl` from structured bootstrap data when available, with a direct
+DOM/script fallback for compatible pages. `_reqid` is generated per request.
+The RPC helper sends the form-encoded `f.req` and `at`, handles XSSI and
+length-prefixed batchexecute frames, and recursively decodes nested JSON.
 
 `getCourseWorkForCourse(courseId)` uses only `pONvgf`. The opaque numeric
 request mask is kept in one template, the supplied course id is substituted at
@@ -361,11 +365,14 @@ When the description changes, the fingerprint changes too. `findMatch()` first l
 
 ## 6. PostgreSQL and task lifecycle
 
-The active database is a managed PostgreSQL database addressed by the required
+The application uses PostgreSQL addressed by the required
 `HOMEWORK_DATABASE_URL`; the current deployment uses Aiven Free and Neon remains
-supported for rollback or another deployment. The application uses the
-provider's TLS connection and a small `pg.Pool`; no local database file, Render
-Persistent Disk, or SQLite fallback is opened by the bot or `npm run sync`.
+supported for rollback or another deployment. Local development can use the
+PostgreSQL 16 service in `compose.yaml`, bound to the host loopback address and
+persisted in a named Docker volume. Both modes use the same small `pg.Pool` and
+database adapter. Neither the bot nor `npm run sync` opens a SQLite fallback or
+a separate local database file. The bundled provider CA is not applied
+automatically to loopback URLs; an explicitly configured CA remains respected.
 
 `src/homework-db.js` is the public factory and
 `src/postgres-homework-db.js` owns the schema and async repository contract.

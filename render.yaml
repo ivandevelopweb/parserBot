@@ -19,6 +19,8 @@ services:
         sync: false
       - key: CLASSROOM_COOKIE_HEADER
         sync: false
+      - key: CLASSROOM_AUTHUSER_INDEX
+        value: "1"
       - key: HOMEWORK_DATABASE_URL
         sync: false
       - key: HOMEWORK_SYNC_INTERVAL_MINUTES
