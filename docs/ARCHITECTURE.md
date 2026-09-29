@@ -234,8 +234,10 @@ The implementation does not contain the account's current course ids.
 Each production course scan reloads the account-scoped page bootstrap so the
 dynamic RPC tokens are not reused across scheduler cycles. If the course-list
 RPC returns HTTP 200 without the known records, the client refreshes the
-bootstrap and retries once. This recovery does not extend or renew the static
-browser cookie session.
+bootstrap and retries once. A coursework RPC that returns HTTP 200 with an
+unrecognized response also gets one request retry with a fresh bootstrap; the
+decoder still rejects the response unless it matches a known schema. This
+recovery does not extend or renew the static browser cookie session.
 
 The course smoke-test first obtains this dynamic list and then calls the
 paginated `getCourseWorkForCourse()` once per course. Its table reports the

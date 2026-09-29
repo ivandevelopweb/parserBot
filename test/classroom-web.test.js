@@ -1151,6 +1151,44 @@ test('coursework fetch rejects an unknown response schema before returning an em
   );
 });
 
+test('coursework fetch refreshes bootstrap once after an unknown successful response', async () => {
+  const bootstrapOptions = [];
+  const requestAtValues = [];
+  let requestCount = 0;
+  const client = {
+    requestIdFactory: () => String(4321 + requestCount),
+    async getAuthenticatedPage(options = {}) {
+      bootstrapOptions.push(options);
+      const suffix = bootstrapOptions.length;
+      return {
+        bootstrap: {
+          at: `at-${suffix}`,
+          fSid: `sid-${suffix}`,
+          bl: `build-${suffix}`,
+        },
+      };
+    },
+    invalidateSession() {},
+    async request(_url, init) {
+      requestAtValues.push(init.body.get('at'));
+      requestCount += 1;
+      const payload = requestCount === 1
+        ? { unrelated: [] }
+        : courseWorkPage([
+          courseWorkArrayRecord('work-1', 'course-1', 'Assignment'),
+        ], 'done');
+      return new Response(batchexecuteResponse(CLASSROOM_RPC_ID, payload), { status: 200 });
+    },
+  };
+
+  const result = await getCourseWorkForCourse(client, 'course-1');
+
+  assert.deepEqual(result.map(({ assignmentId }) => assignmentId), ['work-1']);
+  assert.deepEqual(requestAtValues, ['at-1', 'at-2']);
+  assert.deepEqual(bootstrapOptions.map(({ force }) => force ?? false), [false, true]);
+  assert.equal(requestCount, 2);
+});
+
 test('coursework pagination stops on a repeated continuation value', async () => {
   let requestCount = 0;
   const client = {

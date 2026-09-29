@@ -2198,13 +2198,28 @@ export async function getCourseWorkForCourse(
       rpcOptions.bootstrap = page.bootstrap;
       rpcResult = await callClassroomRpc(rpcOptions);
     }
-    const rpcPayload = debug ? rpcResult.payload : rpcResult;
-    const decoded = decodeCourseWorkPayload(rpcPayload, {
+    let rpcPayload = debug ? rpcResult.payload : rpcResult;
+    let decoded = decodeCourseWorkPayload(rpcPayload, {
       courseId: normalizedCourseId,
       debug,
       includeMetadata: true,
       debugTargets,
     });
+    if (!decoded.recognized && !refreshed) {
+      // An HTTP 200 can still carry a response tied to stale bootstrap data.
+      // Refresh once, then keep rejecting any payload that remains unknown.
+      refreshed = true;
+      page = await refreshSession();
+      rpcOptions.bootstrap = page.bootstrap;
+      rpcResult = await callClassroomRpc(rpcOptions);
+      rpcPayload = debug ? rpcResult.payload : rpcResult;
+      decoded = decodeCourseWorkPayload(rpcPayload, {
+        courseId: normalizedCourseId,
+        debug,
+        includeMetadata: true,
+        debugTargets,
+      });
+    }
     if (!decoded.recognized) {
       throw new ClassroomWebError('Classroom coursework response schema is unknown', {
         code: 'CLASSROOM_RESPONSE_SCHEMA_UNKNOWN',

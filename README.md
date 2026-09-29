@@ -97,8 +97,10 @@ logs a safe configuration message.
 
 Before each production Classroom course scan, the client reloads the account-
 scoped page bootstrap. If Google returns HTTP 200 without the known course-list
-records, it refreshes the bootstrap and retries once. This does not renew an
-expired browser session; export fresh cookies when Google rejects the session.
+records or a coursework RPC returns an unrecognized response, it refreshes the
+bootstrap and retries that RPC once. The response still must match a known
+schema. This does not renew an expired browser session; export fresh cookies
+when Google rejects the session.
 
 Run the smoke-test:
 
