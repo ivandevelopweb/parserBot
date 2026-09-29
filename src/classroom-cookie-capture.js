@@ -307,27 +307,11 @@ export async function startClassroomCookieCapture({
   }
 
   const classroomUrl = buildClassroomCaptureUrl(env.CLASSROOM_AUTHUSER_INDEX ?? '1');
-  const browser = await launchBrowser();
-  const context = await browser.newContext({
-    viewport: CLASSROOM_CAPTURE_VIEWPORT,
-    locale: 'uk-UA',
-  });
-  const page = await context.newPage();
-  page.setDefaultTimeout(15_000);
-  await page.route('**/*', async (route) => {
-    let allowed = false;
-    try {
-      const url = new URL(route.request().url());
-      allowed = url.protocol === 'https:' && isGoogleHost(url.hostname);
-    } catch {
-      allowed = false;
-    }
-    if (allowed || route.request().isNavigationRequest() && route.request().url().startsWith('about:')) {
-      await route.continue();
-    } else {
-      await route.abort('blockedbyclient');
-    }
-  });
+  let browser;
+  let context;
+  let page;
+  let browserStartup;
+  let browserStartupFailed = false;
   const sessions = new Map();
   const failedLogins = new Map();
   let captured = false;
@@ -336,13 +320,17 @@ export async function startClassroomCookieCapture({
   const closeBrowser = async () => {
     if (closed) return;
     closed = true;
-    await browser.close().catch(() => {});
+    await browserStartup?.catch(() => {});
+    await browser?.close().catch(() => {});
   };
 
   const server = createServer(async (request, response) => {
     const url = new URL(request.url ?? '/', 'http://localhost');
     if (request.method === 'GET' && url.pathname === '/healthz') {
-      sendJson(response, 200, { status: 'ok', mode: 'classroom-cookie-capture' });
+      sendJson(response, browserStartupFailed ? 503 : 200, {
+        status: browserStartupFailed ? 'browser_failed' : page ? 'ok' : 'browser_starting',
+        mode: 'classroom-cookie-capture',
+      });
       return;
     }
     if (request.method === 'GET' && url.pathname === '/') {
@@ -395,6 +383,10 @@ export async function startClassroomCookieCapture({
       return;
     }
     if (request.method === 'GET' && url.pathname === `${CLASSROOM_CAPTURE_PATH}/frame`) {
+      if (!page) {
+        send(response, 503, browserStartupFailed ? 'Browser failed to start.' : 'Browser is starting.', 'text/plain; charset=utf-8');
+        return;
+      }
       try {
         const screenshot = await page.screenshot({ type: 'jpeg', quality: 65 });
         response.writeHead(200, {
@@ -417,6 +409,10 @@ export async function startClassroomCookieCapture({
       return;
     }
     if (request.method === 'POST' && url.pathname === `${CLASSROOM_CAPTURE_PATH}/action`) {
+      if (!page) {
+        sendJson(response, 503, { error: browserStartupFailed ? 'Браузер не запустился.' : 'Браузер ещё запускается.' });
+        return;
+      }
       try {
         const action = parseClassroomCaptureAction(await readJsonRequest(request, 8192));
         await applyAction(page, action);
@@ -429,6 +425,10 @@ export async function startClassroomCookieCapture({
       return;
     }
     if (request.method === 'POST' && url.pathname === `${CLASSROOM_CAPTURE_PATH}/export`) {
+      if (!page || !context) {
+        sendJson(response, 503, { error: browserStartupFailed ? 'Браузер не запустился.' : 'Браузер ещё запускается.' });
+        return;
+      }
       const currentUrl = new URL(page.url());
       const authuserIndex = parseClassroomAuthuserIndex(env.CLASSROOM_AUTHUSER_INDEX ?? '1');
       if (currentUrl.hostname !== 'classroom.google.com'
@@ -491,12 +491,46 @@ export async function startClassroomCookieCapture({
   }
 
   logger(`[classroom-cookie-capture] Ready at ${CLASSROOM_CAPTURE_PATH}; open Classroom, sign in to /u/${env.CLASSROOM_AUTHUSER_INDEX ?? '1'}/, then press Capture.`);
-  // Bind the public endpoint before waiting for Google's first navigation. DeployHatch
-  // probes web services shortly after launch, while Classroom redirects can take much
-  // longer. The protected browser UI can load immediately and will show the page once
-  // this background navigation completes.
-  void page.goto(classroomUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {
-    logger('[classroom-cookie-capture] Initial Classroom navigation did not finish; the remote browser remains available.');
+  // DeployHatch probes HTTP readiness while Chromium is still starting. Keep the
+  // capture endpoint responsive and start the browser after the listener binds.
+  browserStartup = (async () => {
+    browser = await launchBrowser();
+    if (closed) {
+      await browser.close().catch(() => {});
+      return;
+    }
+    context = await browser.newContext({
+      viewport: CLASSROOM_CAPTURE_VIEWPORT,
+      locale: 'uk-UA',
+    });
+    page = await context.newPage();
+    page.setDefaultTimeout(15_000);
+    await page.route('**/*', async (route) => {
+      let allowed = false;
+      try {
+        const url = new URL(route.request().url());
+        allowed = url.protocol === 'https:' && isGoogleHost(url.hostname);
+      } catch {
+        allowed = false;
+      }
+      if (allowed || route.request().isNavigationRequest() && route.request().url().startsWith('about:')) {
+        await route.continue();
+      } else {
+        await route.abort('blockedbyclient');
+      }
+    });
+    if (closed) return;
+    logger('[classroom-cookie-capture] Server browser started.');
+    void page.goto(classroomUrl, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {
+      logger('[classroom-cookie-capture] Initial Classroom navigation did not finish; the remote browser remains available.');
+    });
+  })().catch(async (error) => {
+    browserStartupFailed = true;
+    const reason = /^[A-Z0-9_]{2,64}$/u.test(String(error?.code ?? ''))
+      ? String(error.code)
+      : String(error?.name ?? 'BrowserError');
+    logger(`[classroom-cookie-capture] Browser startup failed (${reason}).`);
+    await browser?.close().catch(() => {});
   });
   const timer = setTimeout(async () => {
     if (captured) return;
@@ -508,8 +542,8 @@ export async function startClassroomCookieCapture({
 
   return {
     server,
-    browser,
-    page,
+    get browser() { return browser; },
+    get page() { return page; },
     close: async () => {
       clearTimeout(timer);
       await closeBrowser();

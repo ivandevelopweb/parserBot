@@ -63,6 +63,46 @@ test('capture mode requires a long access key before launching a browser', async
   assert.equal(launched, false);
 });
 
+test('capture HTTP health responds while Chromium is still starting', async () => {
+  let releaseBrowser;
+  const browserReady = new Promise((resolve) => { releaseBrowser = resolve; });
+  let browserClosed = false;
+  const browser = {
+    async newContext() {
+      return {
+        async newPage() {
+          return {
+            setDefaultTimeout() {},
+            async route() {},
+            async goto() {},
+          };
+        },
+      };
+    },
+    async close() { browserClosed = true; },
+  };
+  const capture = await startClassroomCookieCapture({
+    env: { CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY: 'test-access-key-'.padEnd(32, 'x') },
+    logger: () => {},
+    launchBrowser: async () => browserReady,
+    port: 0,
+    host: '127.0.0.1',
+    timeoutMs: 60_000,
+  });
+  const baseUrl = `http://127.0.0.1:${capture.server.address().port}`;
+
+  try {
+    const health = await fetch(`${baseUrl}/healthz`);
+    assert.equal(health.status, 200);
+    assert.equal((await health.json()).status, 'browser_starting');
+    assert.equal((await fetch(`${baseUrl}/capture/classroom`)).status, 200);
+  } finally {
+    releaseBrowser(browser);
+    await capture.close();
+  }
+  assert.equal(browserClosed, true);
+});
+
 test('one authorized capture verifies Node auth and logs the header only once', async () => {
   const exportedCookies = [
     { name: 'SID', value: 'test-session-1' },
@@ -113,6 +153,9 @@ test('one authorized capture verifies Node auth and logs the header only once', 
   const baseUrl = `http://127.0.0.1:${address.port}`;
 
   try {
+    for (let attempt = 0; !navigationStarted && attempt < 100; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
     assert.equal(navigationStarted, true);
     assert.equal((await fetch(`${baseUrl}/healthz`)).status, 200);
     const unauthenticated = await fetch(`${baseUrl}/capture/classroom/frame`);
