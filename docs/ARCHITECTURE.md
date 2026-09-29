@@ -149,8 +149,9 @@ control page at `/capture/classroom`, protected by
 `CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY`; it does not start the bot or any sync.
 The operator completes Google sign-in manually. The exporter asks Chromium for
 cookies applicable to the account-scoped Classroom URL, checks the resulting
-header with the regular Node GET, and emits the full header once to stdout for
-copying into the deployment secret store. The full header is a deliberate
+header with the regular Node client by loading courses and making one
+`pONvgf` request, and emits the full header once to stdout for copying into
+the deployment secret store. A failed Node check does not emit the header. The full header is a deliberate
 exception to normal redacted application logs and must not be enabled after
 capture. DeployHatch must expose the workload as a web service during capture;
 its background-worker service type has no public ingress. The Chromium runtime

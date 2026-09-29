@@ -101,9 +101,10 @@ access key, and complete the Google sign-in yourself in the server browser,
 including any verification prompts. Press **Снять cookies** after Classroom
 opens under `/u/1/`.
 
-The process checks the captured header with the normal Node Classroom GET and
-prints one line beginning `CLASSROOM_COOKIE_HEADER=` to DeployHatch logs. The
-line contains a reusable Google session credential; copy it directly into the
+The process checks the captured header with the normal Node Classroom client:
+it loads the course list, calls `pONvgf` for one course, and only then prints
+one line beginning `CLASSROOM_COOKIE_HEADER=` to DeployHatch logs. The line
+contains a reusable Google session credential; copy it directly into the
 DeployHatch production environment and do not paste it into chat or Git. The
 capture page is protected by the temporary access key. Once copied, set
 `CLASSROOM_COOKIE_CAPTURE_MODE=0`, remove

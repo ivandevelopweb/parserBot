@@ -156,3 +156,62 @@ test('one authorized capture verifies Node auth and logs the header only once', 
     await capture.close();
   }
 });
+
+test('capture does not log a header when Node cannot read coursework', async () => {
+  const logs = [];
+  let browserClosed = false;
+  const page = {
+    url: () => 'https://classroom.google.com/u/1/a/not-turned-in/all',
+    setDefaultTimeout() {},
+    async route() {},
+    async goto() {},
+  };
+  const browser = {
+    async newContext() {
+      return {
+        async newPage() { return page; },
+        async cookies() {
+          return Array.from({ length: 5 }, (_, index) => ({
+            name: `cookie-${index}`,
+            value: `fake-${index}`,
+          }));
+        },
+      };
+    },
+    async close() { browserClosed = true; },
+  };
+  const capture = await startClassroomCookieCapture({
+    env: {
+      CLASSROOM_AUTHUSER_INDEX: '1',
+      CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY: 'test-access-key-'.padEnd(32, 'x'),
+    },
+    logger: (message) => logs.push(message),
+    launchBrowser: async () => browser,
+    verifyNode: async () => false,
+    port: 0,
+    host: '127.0.0.1',
+    timeoutMs: 60_000,
+  });
+  const address = capture.server.address();
+  const baseUrl = `http://127.0.0.1:${address.port}`;
+
+  try {
+    const login = await fetch(`${baseUrl}/capture/classroom/login`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ key: 'test-access-key-'.padEnd(32, 'x') }),
+    });
+    const sessionCookie = login.headers.get('set-cookie').split(';', 1)[0];
+    const exported = await fetch(`${baseUrl}/capture/classroom/export`, {
+      method: 'POST',
+      headers: { cookie: sessionCookie },
+    });
+
+    assert.equal(exported.status, 502);
+    assert.match((await exported.json()).error, /header не выведен/u);
+    assert.equal(logs.some((message) => message.includes('CLASSROOM_COOKIE_HEADER=')), false);
+    assert.equal(browserClosed, false);
+  } finally {
+    await capture.close();
+  }
+});

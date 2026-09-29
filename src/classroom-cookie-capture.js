@@ -81,7 +81,7 @@ async function refresh(){if(!active)return;try{const response=await fetch('/capt
 frame.addEventListener('click',async event=>{const rect=frame.getBoundingClientRect();const x=(event.clientX-rect.left)*frame.naturalWidth/rect.width;const y=(event.clientY-rect.top)*frame.naturalHeight/rect.height;try{await action({type:'click',x,y});}catch(error){status.textContent=error.message;}});
 document.querySelector('#type').addEventListener('click',async()=>{const input=document.querySelector('#text');const value=input.value;input.value='';try{await action({type:'type',text:value});}catch(error){status.textContent=error.message;}});
 document.querySelector('#reload').addEventListener('click',async()=>{try{await action({type:'reload'});}catch(error){status.textContent=error.message;}});
-document.querySelector('#capture').addEventListener('click',async event=>{event.currentTarget.disabled=true;status.textContent='Проверяю текущую сессию…';try{const response=await fetch('/capture/classroom/export',{method:'POST'});const result=await response.json();if(!response.ok)throw new Error(result.error||'Не удалось снять cookies');active=false;status.textContent=result.nodeAccepted?'Header выведен в логи; Node GET уже подтвердил сессию. Выключите capture mode после копирования.':'Header выведен в логи, но Node GET не принял его. Не включайте его в боте без проверки.';}catch(error){event.currentTarget.disabled=false;status.textContent=error.message;}});
+document.querySelector('#capture').addEventListener('click',async event=>{event.currentTarget.disabled=true;status.textContent='Проверяю текущую сессию…';try{const response=await fetch('/capture/classroom/export',{method:'POST'});const result=await response.json();if(!response.ok)throw new Error(result.error||'Не удалось снять cookies');active=false;status.textContent='Header выведен в логи; Node courses и pONvgf успешно проверены. Выключите capture mode после копирования.';}catch(error){event.currentTarget.disabled=false;status.textContent=error.message;}});
 document.addEventListener('keydown',async event=>{if(event.target instanceof HTMLInputElement)return;const key=event.key===' ' ? 'Space' : event.key;if(['Enter','Tab','Escape','Backspace','Delete','ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Home','End','PageUp','PageDown',' '].includes(key)){event.preventDefault();try{await action({type:'press',key});}catch(error){status.textContent=error.message;}}});
 refresh();
 </script></html>`;
@@ -263,13 +263,28 @@ async function verifyNodeCookieHeader({ cookieHeader, env, logger }) {
       timeoutMs: 20_000,
     });
     await client.getAuthenticatedHomePage({ force: true });
-    logger('[classroom-cookie-capture] Node HTTP authentication check: passed');
+    const courses = await client.getCourses();
+    if (!Array.isArray(courses) || courses.length === 0) {
+      throw Object.assign(new Error('No Classroom courses were returned.'), {
+        code: 'CLASSROOM_COURSE_LIST_RESPONSE_ERROR',
+      });
+    }
+    const configuredCourseId = String(env.CLASSROOM_COURSE_ID ?? '').trim();
+    const course = courses.find((item) => String(item?.courseId ?? '') === configuredCourseId)
+      ?? courses[0];
+    const assignments = await client.getCourseWorkForCourse(course.courseId);
+    if (!Array.isArray(assignments)) {
+      throw Object.assign(new Error('Classroom coursework response was not an array.'), {
+        code: 'CLASSROOM_COURSEWORK_RESPONSE_ERROR',
+      });
+    }
+    logger(`[classroom-cookie-capture] Node HTTP check: passed; courses=${courses.length}; pONvgf assignments=${assignments.length}`);
     return true;
   } catch (error) {
     const code = /^[A-Z0-9_]{2,64}$/u.test(String(error?.code ?? ''))
       ? String(error.code)
       : 'CLASSROOM_HTTP_CHECK_FAILED';
-    logger(`[classroom-cookie-capture] Node HTTP authentication check: failed (${code})`);
+    logger(`[classroom-cookie-capture] Node HTTP and pONvgf check: failed (${code})`);
     return false;
   }
 }
@@ -433,13 +448,20 @@ export async function startClassroomCookieCapture({
           return;
         }
         const nodeAccepted = await verifyNode({ cookieHeader, env, logger });
+        if (!nodeAccepted) {
+          captureInProgress = false;
+          sendJson(response, 502, {
+            error: 'Node не подтвердил Classroom cookies через список курсов и pONvgf; header не выведен. Войдите заново и повторите.',
+          });
+          return;
+        }
         const names = cookies.map((cookie) => cookie.name).filter(Boolean);
-        logger(`[classroom-cookie-capture] Captured ${cookies.length} cookies for /u/${authuserIndex}; Node HTTP check: ${nodeAccepted ? 'passed' : 'failed'}`);
+        logger(`[classroom-cookie-capture] Captured ${cookies.length} cookies for /u/${authuserIndex}; Node HTTP and pONvgf checks: passed`);
         logger(`[classroom-cookie-capture] CLASSROOM_COOKIE_HEADER=${cookieHeader}`);
         captured = true;
         captureInProgress = false;
         await closeBrowser();
-        sendJson(response, 200, { ok: true, count: cookies.length, names, nodeAccepted });
+        sendJson(response, 200, { ok: true, count: cookies.length, names, nodeAccepted: true });
       } catch {
         captureInProgress = false;
         sendJson(response, 500, { error: 'Не удалось проверить или экспортировать cookies.' });
