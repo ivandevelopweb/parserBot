@@ -151,7 +151,8 @@ function normalizeCookieDomain(domain) {
 }
 
 function normalizeCookieExpiry(value) {
-  if (value === undefined || value === null || value === '' || value === 0) {
+  if (value === undefined || value === null || value === '' || value === 0
+    || value === -1 || value === '-1') {
     return undefined;
   }
 
@@ -2298,7 +2299,8 @@ export async function getCourses(client, { signal } = {}) {
   let refreshed = false;
   let page;
   try {
-    page = await client.getAuthenticatedHomePage({ signal });
+    // Bootstrap fields are short-lived and may change between scheduled syncs.
+    page = await client.getAuthenticatedHomePage({ force: true, signal });
   } catch (error) {
     if (!refreshable(error)) {
       throw error;
@@ -2330,7 +2332,20 @@ export async function getCourses(client, { signal } = {}) {
     payload = await callClassroomRpc(rpcOptions);
   }
 
-  return decodeCourseListPayload(payload);
+  try {
+    return decodeCourseListPayload(payload);
+  } catch (error) {
+    if (refreshed || error?.code !== 'CLASSROOM_COURSE_LIST_RESPONSE_ERROR') {
+      throw error;
+    }
+
+    // Google can return HTTP 200 with a response tied to stale bootstrap data.
+    refreshed = true;
+    page = await refreshSession();
+    rpcOptions.bootstrap = page.bootstrap;
+    payload = await callClassroomRpc(rpcOptions);
+    return decodeCourseListPayload(payload);
+  }
 }
 
 export function createClassroomWebClient({
@@ -2553,7 +2568,7 @@ export function createClassroomWebClient({
 
       // Reuse the existing session/bootstrap initialization first. This keeps
       // the raw Cookie-header import and its jar semantics in one place.
-      await client.getAuthenticatedPage({ signal });
+      await client.getAuthenticatedPage({ force, signal });
 
       const coursesUrl = classroomUrlForAuthuser(
         CLASSROOM_COURSES_PATH,

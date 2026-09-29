@@ -85,6 +85,17 @@ test('Classroom cookie loader accepts browser arrays, wrappers, and map objects'
   assert.match(await mapped.getCookieString(CLASSROOM_HOME_URL), /B=two/);
 });
 
+test('Classroom cookie JSON keeps browser session cookies with expires=-1', async () => {
+  const record = {
+    name: 'SID', value: 'sid-value', domain: 'classroom.google.com',
+    expirationDate: -1, secure: true,
+  };
+  assert.equal(parseClassroomCookies([record])[0].expires, undefined);
+
+  const jar = await createClassroomCookieJar({ cookies: [record] });
+  assert.match(await jar.getCookieString(CLASSROOM_HOME_URL), /SID=sid-value/);
+});
+
 test('Classroom Cookie header parser accepts ordinary pairs and values containing equals signs', async () => {
   const records = parseClassroomCookieHeader(' SID=sid-value; PREF=one=two ; EMPTY= ');
   assert.deepEqual(records.map(({ name, value }) => ({ name, value })), [
@@ -664,6 +675,23 @@ test('authenticated Classroom page is cached and extracts bootstrap once', async
   assert.equal(second.bootstrap.bl, BOOTSTRAP.bl);
 });
 
+test('forcing the home page refresh also refreshes the root-page bootstrap', async () => {
+  let rootPageOptions;
+  const client = createClassroomWebClient({
+    cookies: [{ name: 'SID', value: 'sid-value' }],
+    fetchImpl: async () => new Response(bootstrapHtml(), { status: 200 }),
+  });
+  client.getAuthenticatedPage = async (options) => {
+    rootPageOptions = options;
+    return { bootstrap: BOOTSTRAP };
+  };
+  client.request = async () => new Response(bootstrapHtml(), { status: 200 });
+
+  await client.getAuthenticatedHomePage({ force: true });
+
+  assert.equal(rootPageOptions.force, true);
+});
+
 test('Classroom refreshes the cached session once after a session refusal', async () => {
   let pageLoads = 0;
   let requestCount = 0;
@@ -1177,6 +1205,7 @@ test('course-list decoder returns visible courses, deduplicates ids, and leaves 
 
 test('getCourses uses the home-page RPC and returns dynamically decoded courses', async () => {
   const calls = [];
+  const homePageOptions = [];
   const payload = [
     'hrq.cus',
     [true],
@@ -1184,7 +1213,8 @@ test('getCourses uses the home-page RPC and returns dynamically decoded courses'
   ];
   const client = {
     requestIdFactory: () => '4321',
-    async getAuthenticatedHomePage() {
+    async getAuthenticatedHomePage(options) {
+      homePageOptions.push(options);
       return { bootstrap: BOOTSTRAP };
     },
     async request(url, init) {
@@ -1196,6 +1226,7 @@ test('getCourses uses the home-page RPC and returns dynamically decoded courses'
   assert.deepEqual(await getCourses(client), [
     { courseId: 'course-1', name: 'Алгебра', teacherName: null },
   ]);
+  assert.deepEqual(homePageOptions, [{ force: true, signal: undefined }]);
   assert.equal(calls.length, 1);
   const requestUrl = new URL(calls[0].url);
   assert.equal(requestUrl.searchParams.get('rpcids'), CLASSROOM_COURSES_RPC_ID);
@@ -1206,4 +1237,47 @@ test('getCourses uses the home-page RPC and returns dynamically decoded courses'
   assert.equal(fReq[0][0][0], CLASSROOM_COURSES_RPC_ID);
   assert.deepEqual(JSON.parse(fReq[0][0][1]), createCourseListRpcPayload());
   assert.equal(requestBody.get('at'), BOOTSTRAP.at);
+});
+
+test('getCourses refreshes bootstrap once when the course-list response has no records', async () => {
+  const calls = [];
+  const homePageOptions = [];
+  let invalidations = 0;
+  let pageLoads = 0;
+  const validPayload = [
+    'hrq.cus',
+    [true],
+    [courseListRecord('course-1', 'Алгебра')],
+  ];
+  const client = {
+    requestIdFactory: () => '4321',
+    invalidateSession() {
+      invalidations += 1;
+    },
+    async getAuthenticatedHomePage(options) {
+      homePageOptions.push(options);
+      pageLoads += 1;
+      return {
+        bootstrap: {
+          ...BOOTSTRAP,
+          at: pageLoads === 1 ? 'stale-at' : 'fresh-at',
+        },
+      };
+    },
+    async request(_url, init) {
+      calls.push(init);
+      const payload = calls.length === 1 ? ['hrq.cus', [true]] : validPayload;
+      return new Response(batchexecuteResponse(CLASSROOM_COURSES_RPC_ID, payload), { status: 200 });
+    },
+  };
+
+  assert.deepEqual(await getCourses(client), [
+    { courseId: 'course-1', name: 'Алгебра', teacherName: null },
+  ]);
+  assert.deepEqual(homePageOptions, [
+    { force: true, signal: undefined },
+    { force: true, signal: undefined },
+  ]);
+  assert.equal(invalidations, 1);
+  assert.deepEqual(calls.map((init) => init.body.get('at')), ['stale-at', 'fresh-at']);
 });

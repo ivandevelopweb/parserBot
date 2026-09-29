@@ -80,6 +80,9 @@ authenticated classroom.google.com browser session and either set
 CLASSROOM_COOKIE_HEADER to its Cookie header value, set CLASSROOM_COOKIES_JSON,
 or save the JSON export as classroom-cookies.json. The header is treated as a
 local secret and is never logged.
+Browser JSON session cookies with `expires: -1` are imported without an expiry
+date instead of being discarded as expired. This preserves the browser's
+session-cookie semantics; it does not extend Google's server-side session.
 If the authenticated browser uses a route such as `/u/1/`, set
 `CLASSROOM_AUTHUSER_INDEX=1` so the web client uses the same account-scoped
 page and RPC paths. The value must match the browser's current Google account
@@ -91,6 +94,11 @@ provider adapter. It does not log in with a username or password, does not use
 Playwright, and does not fall back to the official Google Classroom API. If no
 authenticated cookie source is configured, Classroom is skipped and the bot
 logs a safe configuration message.
+
+Before each production Classroom course scan, the client reloads the account-
+scoped page bootstrap. If Google returns HTTP 200 without the known course-list
+records, it refreshes the bootstrap and retries once. This does not renew an
+expired browser session; export fresh cookies when Google rejects the session.
 
 Run the smoke-test:
 

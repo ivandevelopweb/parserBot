@@ -10,7 +10,7 @@ import { createTestDatabase } from '../test-support/postgres-test-database.js';
 
 const FIXED_NOW = new Date('2026-09-09T12:00:00.000Z');
 
-test('E-school read failure allows Classroom and forces one login on the next cycle', async () => {
+test('E-school transient read failure allows Classroom and reuses the login next cycle', async () => {
   const { database } = await createTestDatabase();
   let logins = 0;
   let reads = 0;
@@ -25,7 +25,11 @@ test('E-school read failure allows Classroom and forces one login on the next cy
     getAppointmentsFn: async (_auth, { now }) => {
       assert.equal(now, FIXED_NOW);
       reads += 1;
-      if (failing) throw new Error('unrecognized session failure: private value');
+      if (failing) {
+        const error = new Error('request timed out');
+        error.name = 'TimeoutError';
+        throw error;
+      }
       return { homeworkTasks: [homework(), ...(addedHomework ? [homework({
         targetAppointmentId: 999999, homeworkId: 999998, subject: 'English',
         description: 'New assignment after session recovery',
@@ -55,13 +59,43 @@ test('E-school read failure allows Classroom and forces one login on the next cy
     addedHomework = true;
     await syncAllHomeworks(options);
     await syncAllHomeworks(options);
-    assert.equal(logins, 2);
+    assert.equal(logins, 1);
     assert.equal(classroomReads, 4);
     assert.equal(deliveries.length, 1);
     assert.equal(deliveries[0].snapshot.subject, 'English');
     assert.equal((await database.pendingNotifications('eschool')).length, 0);
     assert.deepEqual(await database.findMatch(classroomHomework()), classroomBefore);
     assert.equal(JSON.parse(await database.getMeta(ESCHOOL_SYNC_META_KEY)).status, 'ok');
+  } finally { await database.close(); }
+});
+
+test('E-school session failure invalidates the login for the next cycle', async () => {
+  const { database } = await createTestDatabase();
+  let logins = 0;
+  let sessionExpired = false;
+  const options = {
+    auth: { fullLogin: async () => { logins += 1; } },
+    database, legacyStateStore: null, logger: () => {}, now: FIXED_NOW,
+    sendMessageFn: async () => {},
+    getAppointmentsFn: async () => {
+      if (sessionExpired) {
+        const error = new Error('Classroom session expired');
+        error.sessionExpired = true;
+        throw error;
+      }
+      return { homeworkTasks: [homework()] };
+    },
+  };
+  try {
+    await syncAllHomeworks(options);
+    sessionExpired = true;
+    const failed = await syncAllHomeworks(options);
+    assert.equal(failed.failedProviders.some(({ source }) => source === 'eschool'), true);
+    assert.equal(logins, 1);
+
+    sessionExpired = false;
+    await syncAllHomeworks(options);
+    assert.equal(logins, 2);
   } finally { await database.close(); }
 });
 

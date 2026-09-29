@@ -76,9 +76,13 @@ async function syncEschool({ auth, getAppointmentsFn, database, logger, now, sig
           stage = 'snapshot';
           return result;
         } catch (error) {
-          // An unrecognized session failure must not pin every future cycle
-          // to the same client session. Retry login only on the next cycle.
-          loggedInEschoolClients.delete(auth);
+          // A transient read failure (for example a timeout) does not mean
+          // that the login expired. Keep the session for the next cycle; the
+          // appointment client already performs bounded recovery on auth
+          // failures, and only those failures should force a fresh login.
+          if (error?.sessionExpired === true || error?.code === 'APPOINTMENT_RECOVERY_ERROR') {
+            loggedInEschoolClients.delete(auth);
+          }
           throw error;
         }
       },

@@ -104,11 +104,14 @@ complete snapshot and therefore hides previously current E-school rows.
 When the API returns `401`, `403`, or a message that points to an expired session, the client tries one refresh through `/portal`. If that does not work, it performs a full login. There is no endless retry for one request.
 
 The E-school-only wrapper in `bot-sync.js` invalidates its process-local login
-marker after any login or Appointment read failure. The next scheduled cycle
-therefore starts with a full login, even if the previous error was not recognized
-as session expiration. It adds no immediate request retries and does not reset
-authentication on storage errors. Cancellation is propagated without recording
-an outage. Classroom continues through its existing independent provider path.
+marker after an explicit session-expired response or a failed recovery login.
+Transient Appointment read failures such as network timeouts keep the current
+login marker, avoiding an unnecessary `/login` round-trip on the next scheduled
+cycle. The Appointment client still performs bounded session recovery when the
+server reports an expired session. The wrapper adds no immediate retries for
+ordinary read failures and does not reset authentication on storage errors.
+Cancellation is propagated without recording an outage. Classroom continues
+through its existing independent provider path.
 
 The wrapper stores a compact JSON diagnostic under `database_meta` key
 `eschool_sync_status`: attempt time, last successful snapshot time, task count,
@@ -151,9 +154,11 @@ JSON/file sources. Header pairs are imported for `classroom.google.com` into a
 the configured header as the exact HTTP `Cookie` header to preserve browser
 semantics. The parser preserves Google's `__Secure-` prefix when importing
 header pairs, so secure session cookies are not silently discarded before the
-RPC POST. Cookie values and auth-cookie names are never logged. Redirects are
-followed manually for that first request so only sanitized host/path values can
-appear in diagnostics.
+RPC POST. JSON exports that mark a session cookie with `expires: -1` are
+imported without an expiry date, matching the browser's session-cookie
+semantics. Cookie values and auth-cookie names are never logged. Redirects are
+followed manually for that first request so only sanitized host/path values
+can appear in diagnostics.
 
 The client first requests `/a/not-turned-in/all` and treats a Google login page,
 401, or 403 as an expired browser session. When `CLASSROOM_AUTHUSER_INDEX=N` is
@@ -225,6 +230,12 @@ returned by the browser's `O1Xqee` response. The course id is at record
 `[0][0]` and the displayed course name is at `[5]`. No independently verified
 teacher-name field was present, so normalized courses use `teacherName: null`.
 The implementation does not contain the account's current course ids.
+
+Each production course scan reloads the account-scoped page bootstrap so the
+dynamic RPC tokens are not reused across scheduler cycles. If the course-list
+RPC returns HTTP 200 without the known records, the client refreshes the
+bootstrap and retries once. This recovery does not extend or renew the static
+browser cookie session.
 
 The course smoke-test first obtains this dynamic list and then calls the
 paginated `getCourseWorkForCourse()` once per course. Its table reports the
