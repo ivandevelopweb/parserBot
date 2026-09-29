@@ -6,7 +6,7 @@ HomeworkParser reads homework from Єдина школа and, when configured, G
 
 The project is built for one local process, one Єдина школа account, one optional Google Classroom browser session, and one configured Telegram chat. The Telegram UI can store the browser's Google account order used when opening Classroom links.
 
-The E-school login, diary access, Classroom API/web calls, and Telegram calls use HTTP clients. The Classroom web path reuses cookies from an already authenticated browser session; it does not implement Google username/password login.
+The E-school login, diary access, Classroom web calls, and Telegram calls use HTTP clients. The Classroom web path reuses cookies from an authenticated browser session. Its optional one-time capture mode runs a server-side Chromium session so an operator can complete Google sign-in manually and export the cookies; the bot does not automate Google username/password login.
 
 ## 2. Data flow
 
@@ -47,8 +47,8 @@ other provider from running.
 
 | Layer | Files | Responsibility |
 | --- | --- | --- |
-| Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js`, `src/eschool-session-diagnostic-cli.js` | Load `.env` when needed, assemble dependencies, and start the selected mode. The E-school session diagnostic is isolated from production sync. |
-| Authentication | `src/auth.js`, `src/classroom-web.js` | Perform E-school login through the dynamic Next.js Server Action; keep E-school cookies in memory; and load the already authenticated Classroom browser cookie source. |
+| Entry points | `src/index.js`, `src/sync-cli.js`, `src/bot-cli.js`, `src/telegram-check.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js`, `src/eschool-session-diagnostic-cli.js` | Load `.env` when needed, assemble dependencies, and start the selected mode. `CLASSROOM_COOKIE_CAPTURE_MODE=1` selects the isolated cookie-capture server instead of the bot. The E-school session diagnostic is isolated from production sync. |
+| Authentication | `src/auth.js`, `src/classroom-web.js`, `src/classroom-cookie-capture.js` | Perform E-school login through the dynamic Next.js Server Action; keep E-school cookies in memory; load the configured Classroom browser cookie source; and optionally run an operator-controlled Chromium login/cookie capture session. |
 | Diary client | `src/eschool.js` | Bootstrap `seplogin`, fetch the current and next weeks from Appointment API, extract homework, and deduplicate it. |
 | Classroom web client and provider | `src/classroom-web.js`, `src/classroom-provider.js`, `src/classroom-smoke-cli.js`, `src/classroom-courses-smoke-cli.js` | Load an authenticated browser cookie jar, discover dynamic web bootstrap values and courses from the home-page RPC, call the internal `pONvgf` RPC with explicit state filters, validate the confirmed wire shapes, classify coursework status conservatively, and adapt eligible coursework to the common task model. The low-level transport remains isolated from sync and Telegram. |
 | Domain normalization | `src/sync.js`, `src/utils.js` | Build source-aware fingerprints, snapshots, and normalized fields. `sync.js` also contains the original JSON sync path. |
@@ -142,6 +142,19 @@ The supported Classroom path is the authenticated browser-cookie web/RPC
 client and provider. The bot does not fall back to OAuth or the official
 Google Classroom API. If no cookie source is configured, Classroom is skipped
 with a safe configuration log and the E-school provider can continue.
+
+The optional server-side capture mode is selected with
+`CLASSROOM_COOKIE_CAPTURE_MODE=1`. It starts Chromium and a temporary HTTP
+control page at `/capture/classroom`, protected by
+`CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY`; it does not start the bot or any sync.
+The operator completes Google sign-in manually. The exporter asks Chromium for
+cookies applicable to the account-scoped Classroom URL, checks the resulting
+header with the regular Node GET, and emits the full header once to stdout for
+copying into the deployment secret store. The full header is a deliberate
+exception to normal redacted application logs and must not be enabled after
+capture. DeployHatch must expose the workload as a web service during capture;
+its background-worker service type has no public ingress. The Chromium runtime
+also needs more memory than the bot-only worker.
 
 #### Classroom web/RPC client and provider
 
@@ -655,7 +668,7 @@ Every callback checks the configured `TELEGRAM_CHAT_ID`. Updates from another ch
 | --- | --- |
 | `npm start` | Smoke-test: login, force a refresh check through `/portal`, fetch the current and next weeks, and print tasks to the console. |
 | `npm run sync` | One production sync: authenticate the E-school provider as needed, fetch E-school and configured Classroom data, compare with PostgreSQL, deliver queued new/changed tasks, and exit. |
-| `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes by default. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. |
+| `npm run bot` | Configure Telegram, run an immediate sync, then poll Telegram and sync every 10 minutes by default. E-school authentication is protected inside the provider branch, so a Classroom failure does not prevent an independent E-school attempt. The process stays alive. When `CLASSROOM_COOKIE_CAPTURE_MODE=1`, the same command starts only the isolated Classroom cookie-capture server instead. |
 | `npm run classroom:smoke` | Load the local authenticated Classroom cookies, verify the web session and bootstrap, call `pONvgf` for `CLASSROOM_COURSE_ID` (default `544644036115`), inspect/save the response in debug mode, decode it, and exit. It does not touch Telegram or PostgreSQL. |
 | `npm run classroom:courses:smoke` | Load `/h`, discover the visible courses from `gXtzob` without hardcoded course ids, fetch all available `pONvgf` pages for every course, print `course name | assignments fetched | pages fetched | newest assignment`, and exit. It does not touch Telegram or PostgreSQL. |
 | `npm run telegram:test` | Send one diagnostic message to the configured chat. This has an external side effect and should not be run by accident. |
@@ -729,7 +742,7 @@ interval.
 ## 9. Security and privacy
 
 - `.env` is not committed and must not appear in command output.
-- The Telegram token, password, and cookies are not logged.
+- The Telegram token, password, and cookies are not logged during normal bot and smoke-test operation. The explicitly enabled one-time Classroom capture mode prints the requested full cookie header to stdout; disable it immediately after copying the header.
 - Google client secrets, refresh tokens, and Classroom cookie values are not logged. Local Google credential, token, and cookie files are ignored by Git.
 - Invalid Classroom cookie errors identify only a record number; they do not echo cookie names or values. Telegram delivery errors do not include the E-school fingerprint, because it contains homework text.
 - The Server Action id is shown only in shortened form.

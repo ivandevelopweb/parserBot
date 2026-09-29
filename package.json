@@ -2,7 +2,7 @@
   "name": "eschool-smoke-test",
   "version": "1.0.0",
   "private": true,
-  "description": "Browserless Node.js smoke-test client for the Єдина школа service",
+  "description": "Node.js homework bot with a one-time server-side Classroom cookie capture mode",
   "type": "module",
   "engines": {
     "node": ">=24.21.0 <25"
@@ -20,11 +20,13 @@
     "test": "node --disable-warning=ExperimentalWarning --test"
   },
   "dependencies": {
+    "@sparticuz/chromium": "^153.0.0",
     "cheerio": "1.0.0",
     "dotenv": "16.4.7",
     "fetch-cookie": "3.1.0",
     "googleapis": "^178.1.1",
     "pg": "^8.23.0",
+    "playwright-core": "^1.63.0",
     "tough-cookie": "5.1.2"
   },
   "devDependencies": {

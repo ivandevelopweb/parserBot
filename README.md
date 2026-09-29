@@ -89,6 +89,33 @@ page and RPC paths. The value must match the browser's current Google account
 order (`0` through `10`).
 The cookie file is local-only and must never be committed.
 
+### One-time Classroom cookie capture on DeployHatch
+
+To create a fresh cookie header in the DeployHatch runtime, temporarily set
+`CLASSROOM_COOKIE_CAPTURE_MODE=1`, set
+`CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY` to a random secret of at least 32
+characters, and keep `CLASSROOM_AUTHUSER_INDEX=1`. Temporarily change the
+DeployHatch service from a background worker to a public web workload so its
+HTTPS URL can reach the capture page. Open `/capture/classroom`, enter the
+access key, and complete the Google sign-in yourself in the server browser,
+including any verification prompts. Press **Снять cookies** after Classroom
+opens under `/u/1/`.
+
+The process checks the captured header with the normal Node Classroom GET and
+prints one line beginning `CLASSROOM_COOKIE_HEADER=` to DeployHatch logs. The
+line contains a reusable Google session credential; copy it directly into the
+DeployHatch production environment and do not paste it into chat or Git. The
+capture page is protected by the temporary access key. Once copied, set
+`CLASSROOM_COOKIE_CAPTURE_MODE=0`, remove
+`CLASSROOM_COOKIE_CAPTURE_ACCESS_KEY`, restore the service type to worker, set
+the new `CLASSROOM_COOKIE_HEADER`, and redeploy. Capture mode does not start
+the bot, Telegram polling, PostgreSQL, or either homework sync.
+
+The Chromium package recommends at least 512 MB of runtime memory. The capture
+deployment must have enough memory and a public web URL.
+The header is deliberately printed only in this explicitly enabled one-time
+mode; normal bot and smoke-test logs continue to omit cookie values.
+
 The production Classroom path uses the web smoke-test client through the common
 provider adapter. It does not log in with a username or password, does not use
 Playwright, and does not fall back to the official Google Classroom API. If no
@@ -418,7 +445,7 @@ The client fetches `/login` each time, extracts the dynamic `$ACTION_REF_1`, `$A
 
 The smoke-test removes only `session_token`, then calls `/portal`. A new `session_token` confirms the refresh flow.
 
-The current diary also needs a regular HTTP bootstrap: `GET` and `POST /api/v1/seplogin` on `diary.eschool-ua.com`. The client selects school binding `8276`, sends it back, and checks the returned `application_token` cookie. This is the same step used by the browser client, but the project does not use Playwright or Puppeteer.
+The current diary also needs a regular HTTP bootstrap: `GET` and `POST /api/v1/seplogin` on `diary.eschool-ua.com`. The client selects school binding `8276`, sends it back, and checks the returned `application_token` cookie. This is the same step used by the browser client; the E-school client does not use Playwright or Puppeteer. The separate, opt-in Classroom capture mode uses server-side Chromium only for the one-time manual Google sign-in and cookie export.
 
 Appointment API is queried for Monday through Sunday of the current and next week (14 days) in `Europe/Kyiv`. This lets the bot notify about next Monday's homework before the week changes. On `401`, `403`, or signs of an expired session, the client first tries a refresh through `/portal`. If that fails, it performs one full login. There is no endless retry.
 

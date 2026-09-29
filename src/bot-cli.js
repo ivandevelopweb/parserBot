@@ -9,6 +9,19 @@ import { createTelegramClient, DEFAULT_TELEGRAM_TIMEOUT_MS } from './telegram.js
 import { errorMessage } from './utils.js';
 
 async function main() {
+  if (String(process.env.CLASSROOM_COOKIE_CAPTURE_MODE ?? '').trim() === '1') {
+    const { startClassroomCookieCapture } = await import('./classroom-cookie-capture.js');
+    const capture = await startClassroomCookieCapture({ logger: console.log });
+    const shutdownCapture = () => {
+      process.removeListener('SIGINT', shutdownCapture);
+      process.removeListener('SIGTERM', shutdownCapture);
+      void capture.close();
+    };
+    process.once('SIGINT', shutdownCapture);
+    process.once('SIGTERM', shutdownCapture);
+    return;
+  }
+
   let database;
   let healthServer;
   let bot;
